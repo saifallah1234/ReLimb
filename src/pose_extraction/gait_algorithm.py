@@ -8,9 +8,9 @@ import os
 from datetime import datetime
 
 # ---------- PARAMETERS ----------
-VIDEO_PATH = 'ressources/walking_white.mp4'
-OUTPUT_EVENTS_CSV = 'data/detected_events.csv'
-GROUND_TRUTH_CSV = 'data/ground_truth_events.csv'  # optional: CSV with column 'time_s' or 'frame'
+DATA_DIR = 'data/raw_videos'
+SESSION_DIR = 'data/sessions'
+#GROUND_TRUTH_CSV = 'data/ground_truth_events.csv'  # optional: CSV with column 'time_s' or 'frame'
 T_TOLERANCE = 0.2  # seconds tolerance for matching events
 MIN_STEP_SEPARATION_S = 0.8  # minimum seconds between successive steps (paper uses 0.8 s)
 BUTTER_ORDER = 10
@@ -51,7 +51,7 @@ def detect_events_from_signal(signal, fps, min_separation_s=MIN_STEP_SEPARATION_
     troughs, _ = find_peaks(inv_signal, distance=min_dist_frames, height=-height_threshold)
     return peaks, troughs
 
-def main():
+def process_video(VIDEO_PATH,session_id):
     cap = cv.VideoCapture(VIDEO_PATH)
     if not cap.isOpened():
         print("Error opening video:", VIDEO_PATH)
@@ -152,10 +152,10 @@ def main():
     peaks_right, troughs_right = detect_events_from_signal(right_filt, fps)
 
     # Convert frame indices to times
-    times_peaks_left = peaks_left / fps
+    """times_peaks_left = peaks_left / fps
     times_troughs_left = troughs_left / fps
     times_peaks_right = peaks_right / fps
-    times_troughs_right = troughs_right / fps
+    times_troughs_right = troughs_right / fps"""
 
     # Save detected events
     rows = []
@@ -168,11 +168,15 @@ def main():
     for f in troughs_right:
         rows.append({'side':'right','event':'toe_off','frame':int(f),'time_s':float(f/fps)})
     df_events = pd.DataFrame(rows)
-    df_events.to_csv(OUTPUT_EVENTS_CSV, index=False)
-    print(f"Saved detected events to {OUTPUT_EVENTS_CSV}")
+    # Save session folder
+    session_folder = os.path.join(SESSION_DIR, session_id)
+    os.makedirs(session_folder, exist_ok=True)
+    output_csv = os.path.join(session_folder, "detected_events.csv")
+    df_events.to_csv(output_csv, index=False)
+    print(f"💾 Saved detected events to {output_csv}")
 
     # ---------- Optional evaluation ----------
-    if os.path.exists(GROUND_TRUTH_CSV):
+    """if os.path.exists(GROUND_TRUTH_CSV):
         gt = pd.read_csv(GROUND_TRUTH_CSV)
         # Accept either 'frame' or 'time_s' column
         if 'time_s' in gt.columns:
@@ -195,7 +199,21 @@ def main():
             print("Mean absolute error (s):", np.mean(errors))
         print("Unmatched GT:", len(unmatched_gt), "Unmatched detections:", len(unmatched_det))
     else:
-        print("No ground truth file found — skipped evaluation. Place a CSV at", GROUND_TRUTH_CSV)
+        print("No ground truth file found — skipped evaluation. Place a CSV at", GROUND_TRUTH_CSV)"""
+def main():
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    video_files = [f for f in os.listdir(DATA_DIR) if f.lower().endswith((".mp4", ".avi", ".mov"))]
+
+    if not video_files:
+        print(f"No videos found in {DATA_DIR}")
+        return
+
+    print(f"Found {len(video_files)} video(s) to process.")
+    for idx, video_file in enumerate(video_files, 1):
+        video_path = os.path.join(DATA_DIR, video_file)
+        # create session id like 2025-11-01_01_filename
+        session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx:02d}_{os.path.splitext(video_file)[0]}"
+        process_video(video_path, session_id)
 
 if __name__ == "__main__":
     main()
