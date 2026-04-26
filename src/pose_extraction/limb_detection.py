@@ -1,109 +1,198 @@
+import cv2 as cv
+import numpy as np
 import pandas as pd
+from cvzone.PoseModule import PoseDetector
+from scipy.signal import butter, filtfilt, find_peaks
 import os
+from pathlib import Path
 
-# === PATH CONFIG ===
-SESSION_DIR = "data/sessions"
-OUTPUT_FEATURES_CSV = "src/features/feature_events.xlsx"  # Single global CSV file
+# ── Project layout ─────────────────────────────────────────────────────────
+SCRIPT_DIR   = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
-# === COMPUTE BASIC METRICS ===
-def compute_gait_times(events):
-    heel_strikes = events[events['event'] == 'heel_strike']['time_s'].values
-    toe_offs = events[events['event'] == 'toe_off']['time_s'].values
-    
-    stride_times, stance_times, swing_times = [], [], []
-    
-    for i in range(len(heel_strikes) - 1):
-        stride_times.append(heel_strikes[i + 1] - heel_strikes[i])
-        
-        # Find nearest toe off after heel strike
-        later_toe_offs = toe_offs[toe_offs > heel_strikes[i]]
-        if len(later_toe_offs) > 0:
-            stance_times.append(later_toe_offs[0] - heel_strikes[i])
-        
-        # Find next heel strike after toe off for swing time
-        later_hs = heel_strikes[heel_strikes > later_toe_offs[0]] if len(later_toe_offs) > 0 else []
-        if len(later_hs) > 0:
-            swing_times.append(later_hs[0] - later_toe_offs[0])
-    
-    return {
-        "stride_mean": sum(stride_times)/len(stride_times) if stride_times else 0,
-        "stance_mean": sum(stance_times)/len(stance_times) if stance_times else 0,
-        "swing_mean": sum(swing_times)/len(swing_times) if swing_times else 0,
-        "stride_times": stride_times,
-        "stance_times": stance_times,
-        "swing_times": swing_times
-    }
+DATA_DIR    = PROJECT_ROOT / 'data' / 'raw_videos' / 'hf'
+SESSION_DIR = PROJECT_ROOT / 'data' / 'sessions'
 
-# === ASYMMETRY COMPUTATION ===
-def compute_asymmetry(events_path, session_id):
-    df = pd.read_csv(events_path)
-    left = df[df['side'] == 'left']
-    right = df[df['side'] == 'right']
-    
-    left_metrics = compute_gait_times(left)
-    right_metrics = compute_gait_times(right)
+# ── Parameters ─────────────────────────────────────────────────────────────
+T_TOLERANCE           = 0.2
+MIN_STEP_SEPARATION_S = 0.8
+BUTTER_ORDER          = 10
+NORMALIZED_CUTOFF     = 0.1752
 
-    # Gait asymmetry index
-    def pct_diff(a, b):
-        return abs(a - b) / ((a + b) / 2) * 100 if (a + b) != 0 else 0
+# ── Signal processing ──────────────────────────────────────────────────────
 
-    stride_asymmetry = pct_diff(left_metrics["stride_mean"], right_metrics["stride_mean"])
-    stance_asymmetry = pct_diff(left_metrics["stance_mean"], right_metrics["stance_mean"])
-    swing_asymmetry = pct_diff(left_metrics["swing_mean"], right_metrics["swing_mean"])
-    
-    return {
-        "session_id": session_id,
-        "Left stride mean": left_metrics['stride_mean'],
-        "Right stride mean": right_metrics['stride_mean'],
-        "Left stance mean": left_metrics['stance_mean'],
-        "Right stance mean": right_metrics['stance_mean'],
-        "Left swing mean": left_metrics['swing_mean'],
-        "Right swing mean": right_metrics['swing_mean'],
-        "Asymmetry (stride)": stride_asymmetry,
-        "Asymmetry (stance)": stance_asymmetry,
-        "Asymmetry (swing)": swing_asymmetry
-    }
+def butter_lowpass_filter(x, order, Wn):
+    b, a = butter(order, Wn, btype='low', analog=False)
+    return filtfilt(b, a, x)
 
-# === MAIN LOOP ===
-def main():
-    print(f"🔍 Scanning session folders in: {SESSION_DIR}")
-    
-    session_folders = [
-        os.path.join(SESSION_DIR, d)
-        for d in os.listdir(SESSION_DIR)
-        if os.path.isdir(os.path.join(SESSION_DIR, d))
-    ]
-    
-    if not session_folders:
-        print("⚠️ No session folders found!")
+def interp_nan(x):
+    n    = len(x)
+    idx  = np.arange(n)
+    mask = ~np.isnan(x)
+    if mask.sum() < 2:
+        return x
+    return np.interp(idx, idx[mask], x[mask])
+
+def detect_events_from_signal(signal, fps, min_separation_s=MIN_STEP_SEPARATION_S, height_threshold=None):
+    min_dist = int(min_separation_s * fps)
+    if height_threshold is None:
+        height_threshold = (0.2 * (np.nanmax(signal) - np.nanmin(signal)) + np.nanmin(signal))
+    peaks,   _ = find_peaks( signal, distance=min_dist, height= height_threshold)
+    troughs, _ = find_peaks(-signal, distance=min_dist, height=-height_threshold)
+    return peaks, troughs
+
+# ── XML keypoint overlay ──────────────────────────────────────────────────
+
+def _apply_xml_overlay(keypoints_mp: np.ndarray, xml_path: Path) -> np.ndarray:
+    try:
+        from xml_loader import parse_xml
+    except ImportError:
+        print("  ⚠ xml_loader not found — skipping XML overlay")
+        return keypoints_mp
+
+    kp_xml, n_xml = parse_xml(xml_path)
+    n_mp  = keypoints_mp.shape[0]
+
+    if n_xml != n_mp:
+        print(f"  ⚠ Frame count mismatch: video={n_mp}, XML={n_xml}. Truncating.")
+        min_n = min(n_mp, n_xml)
+        keypoints_mp = keypoints_mp[:min_n]
+        kp_xml       = kp_xml[:min_n]
+
+    valid_mask = ~np.isnan(kp_xml)
+    keypoints_mp[valid_mask] = kp_xml[valid_mask]
+    print(f"  ✓ XML overlay applied: {valid_mask.sum()} values updated")
+    return keypoints_mp
+
+# ── Core processing ────────────────────────────────────────────────────────
+
+def process_video(video_path: Path, session_id: str, xml_path: Path | None = None, xml_only: bool = False):
+    if xml_only and xml_path is not None and xml_path.exists():
+        print(f"  ℹ xml_only=True — skipping MediaPipe")
+        from xml_loader import load_xml_session
+        fps = 25.0
+        cap = cv.VideoCapture(str(video_path))
+        if cap.isOpened():
+            fps = cap.get(cv.CAP_PROP_FPS) or 25.0
+            cap.release()
+        load_xml_session(xml_path, session_id, fps=fps, save=True)
         return
 
-    all_rows = []
+    cap = cv.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"  ✗ Cannot open: {video_path}")
+        return
 
-    for session_path in session_folders:
-        events_path = os.path.join(session_path, "detected_events.csv")
-        if not os.path.exists(events_path):
-            print(f"⚠️ No detected_events.csv found in {session_path}")
-            continue
+    fps         = cap.get(cv.CAP_PROP_FPS) or 25.0
+    frame_count = int(cap.get(cv.CAP_PROP_FRAME_COUNT) or 0)
+    print(f"  FPS={fps:.1f}  frames={frame_count}")
+
+    detector = PoseDetector(staticMode=False, modelComplexity=1, smoothLandmarks=True, 
+                            enableSegmentation=False, detectionCon=0.5, trackCon=0.5)
+
+    left_hip_x, left_foot_x, right_hip_x, right_foot_x = [], [], [], []
+    keypoint_rows = []
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
+        frame_idx += 1
+
+        # 1. PRE-INITIALIZE (Fixes the "Undefined" error)
+        lh_x = lf_x = rh_x = rf_x = np.nan
+        kp_row = np.full(66, np.nan, dtype=np.float32)
+
+        frame = cv.resize(frame, (640, 480))
+        frame = detector.findPose(frame)
+        lmList, _ = detector.findPosition(frame, draw=False, bboxWithHands=False)
+
+        # 2. EXTRACT
+        if lmList:
+            # Fill the 66-column row
+            for lm_i in range(min(len(lmList), 33)):
+                kp_row[lm_i * 2]     = lmList[lm_i][0]
+                kp_row[lm_i * 2 + 1] = lmList[lm_i][1]
+            
+            try:
+                lh_x = lmList[23][0]
+                rh_x = lmList[24][0]
+                lf_x = lmList[31][0] if len(lmList) > 31 else lmList[27][0]
+                rf_x = lmList[32][0] if len(lmList) > 32 else lmList[28][0]
+            except Exception: pass
+
+        left_hip_x.append(lh_x)
+        left_foot_x.append(lf_x)
+        right_hip_x.append(rh_x)
+        right_foot_x.append(rf_x)
+        keypoint_rows.append(kp_row)
+
+    cap.release()
+
+    # 3. SIGNAL PROCESSING
+    lh = interp_nan(np.array(left_hip_x,   dtype=np.float64))
+    lf = interp_nan(np.array(left_foot_x,  dtype=np.float64))
+    rh = interp_nan(np.array(right_hip_x,  dtype=np.float64))
+    rf = interp_nan(np.array(right_foot_x, dtype=np.float64))
+
+    left_signal  = (lh - lf) - np.nanmedian(lh - lf)
+    right_signal = (rh - rf) - np.nanmedian(rh - rf)
+
+    Wn = NORMALIZED_CUTOFF if NORMALIZED_CUTOFF < 1.0 else 0.45
+    try:
+        left_filt  = butter_lowpass_filter(left_signal,  BUTTER_ORDER, Wn)
+        right_filt = butter_lowpass_filter(right_signal, BUTTER_ORDER, Wn)
+    except Exception:
+        left_filt, right_filt = left_signal, right_signal
+
+    peaks_left,   troughs_left  = detect_events_from_signal(left_filt,  fps)
+    peaks_right,  troughs_right = detect_events_from_signal(right_filt, fps)
+
+    keypoints_array = np.stack(keypoint_rows, axis=0).astype(np.float32)
+    if xml_path and xml_path.exists():
+        keypoints_array = _apply_xml_overlay(keypoints_array, xml_path)
+
+    # 4. SAVE
+    session_folder = SESSION_DIR / session_id
+    session_folder.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    for f in peaks_left:   rows.append({'side': 'left',  'event': 'heel_strike', 'frame': int(f), 'time_s': f/fps})
+    for f in troughs_left:  rows.append({'side': 'left',  'event': 'toe_off',     'frame': int(f), 'time_s': f/fps})
+    for f in peaks_right:  rows.append({'side': 'right', 'event': 'heel_strike', 'frame': int(f), 'time_s': f/fps})
+    for f in troughs_right: rows.append({'side': 'right', 'event': 'toe_off',     'frame': int(f), 'time_s': f/fps})
+
+    pd.DataFrame(rows).to_csv(session_folder / 'detected_events.csv', index=False)
+    np.save(str(session_folder / 'keypoints.npy'), keypoints_array)
+
+def main():
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv'}
+    video_paths = sorted([p for p in DATA_DIR.rglob('*') if p.suffix.lower() in video_extensions])
+
+    if not video_paths: return
+
+    for video_path in video_paths:
+        relative_path = video_path.relative_to(DATA_DIR)
+        session_id = "_".join(relative_path.with_suffix('').parts)
         
-        session_id = os.path.basename(session_path)
-        print(f"▶ Processing session: {session_id}")
+        print(f"▶ {relative_path}  →  session: {session_id}")
+
+        # --- UPDATED LOGIC HERE ---
+        # Instead of just .xml, look for [video_name]_annotations.xml
+        xml_name = video_path.stem + "_annotations.xml"
+        xml_candidate = video_path.parent / xml_name
+        
+        xml_path = xml_candidate if xml_candidate.exists() else None
+        
+        if xml_path:
+            print(f"   ✓ Found matching annotation: {xml_name}")
+        # --------------------------
         
         try:
-            row = compute_asymmetry(events_path, session_id)
-            all_rows.append(row)
+            process_video(video_path, session_id, xml_path=xml_path)
         except Exception as e:
-            print(f"❌ Error processing {session_id}: {e}")
-    
-    # Combine all rows into one DataFrame
-    if all_rows:
-        df_all = pd.DataFrame(all_rows)
-        os.makedirs(os.path.dirname(OUTPUT_FEATURES_CSV), exist_ok=True)
-        df_all.to_excel(OUTPUT_FEATURES_CSV, index=False)
-        print(f"💾 Saved combined feature dataset to {OUTPUT_FEATURES_CSV}")
-    else:
-        print("⚠️ No valid sessions processed.")
+            print(f"   ❌ Error: {e}")
 
-# === RUN ===
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

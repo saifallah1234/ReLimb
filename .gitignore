@@ -5,3 +5,11 @@ __pycache__/
 *.pyd
 .DS_Store
 .env
+data/raw_videos/
+data/sessions/
+data/output/
+data/models/
+data/features/
+data/raw_videos/hf/dataset_index.json
+data/raw_videos/hf/metadata.jsonl
+

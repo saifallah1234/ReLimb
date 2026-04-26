@@ -1,0 +1,11 @@
+{
+    "Alignment/Varus/Valgus Issue": 0,
+    "Knee Flexion/Extension Issue": 1,
+    "Normal Gait": 2,
+    "Prosthesis Length Issue": 3,
+    "Step Dimensions Issue": 4,
+    "Terminal Impact / Foot Issue": 5,
+    "Toe-Out / Rotation Issue": 6,
+    "Unknown / Other": 7,
+    "Whip / Circumduction": 8
+}
