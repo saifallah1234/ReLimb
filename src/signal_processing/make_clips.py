@@ -126,28 +126,51 @@ def copy_json_for_clip(src_json: Path, dst_json: Path) -> None:
     shutil.copy2(src_json, dst_json)
 
 
-def shift_xml_for_clip(src_xml: Path, dst_xml: Path, start_frame: int) -> None:
+def shift_xml_for_clip(src_xml: Path, dst_xml: Path, start_frame: int, window: int) -> None:
     """
     Copy the XML annotation, adjusting all frame= attributes by -start_frame
     so they align with the clip's local frame indices.
-    Frames that fall outside [0, window) are marked outside="1".
+
+    Elements (skeleton or mask) whose shifted frame falls outside [0, window)
+    are REMOVED entirely from the track — not just marked hidden — so that
+    downstream tools only see exactly the frames that belong to this clip.
     """
     tree = ET.parse(str(src_xml))
     root = tree.getroot()
 
-    for skeleton in root.iter("skeleton"):
-        orig = int(skeleton.get("frame", 0))
-        new_frame = orig - start_frame
-        skeleton.set("frame", str(new_frame))
+    for track in root.findall(".//track"):
+        # Collect all direct child elements that carry a frame= attribute.
+        # CVAT uses <skeleton> for pose tracks and <mask> for segmentation tracks.
+        children_to_remove = []
 
-        # If this skeleton is outside the clip window, mark all its points hidden
-        if new_frame < 0:
-            for pt in skeleton.findall("points"):
-                pt.set("outside", "1")
+        for child in list(track):
+            frame_attr = child.get("frame")
+            if frame_attr is None:
+                continue  # future element types — leave untouched
 
-    # Update segment stop in meta (optional but clean)
+            orig = int(frame_attr)
+            new_frame = orig - start_frame
+
+            if new_frame < 0 or new_frame >= window:
+                # This annotation does not belong to the clip — drop it
+                children_to_remove.append(child)
+            else:
+                child.set("frame", str(new_frame))
+                # Mark every kept frame as a keyframe so downstream code
+                # does not try to interpolate beyond the clip boundaries
+                child.set("keyframe", "1")
+
+        for child in children_to_remove:
+            track.remove(child)
+
+    # Update segment metadata to match the clip window
     for seg in root.iter("segment"):
-        seg.set("stop", str(WINDOW_FRAMES - 1))
+        seg.set("start", "0")
+        seg.set("stop", str(window - 1))
+
+    # Update task size in meta so CVAT-style readers know the clip length
+    for size_el in root.iter("size"):
+        size_el.text = str(window)
 
     tree.write(str(dst_xml), encoding="utf-8", xml_declaration=True)
 
@@ -211,7 +234,7 @@ def process_video(
 
         # ── XML annotations (frame-shifted copy) ──────────────────────────
         if xml_src.exists():
-            shift_xml_for_clip(xml_src, clip_xml, start_frame=start)
+            shift_xml_for_clip(xml_src, clip_xml, start_frame=start, window=window)
         else:
             print(f"    ⚠ No XML found for {stem} — clip has no skeleton annotations")
 

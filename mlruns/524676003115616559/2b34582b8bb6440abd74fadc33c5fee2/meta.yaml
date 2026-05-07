@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/User/Desktop/ReLimb/ReLimb/mlruns/524676003115616559/2b34582b8bb6440abd74fadc33c5fee2/artifacts
+end_time: 1777753803776
+entry_point_name: ''
+experiment_id: '524676003115616559'
+lifecycle_stage: active
+run_id: 2b34582b8bb6440abd74fadc33c5fee2
+run_name: mlp_only
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1777753783960
+status: 3
+tags: []
+user_id: User

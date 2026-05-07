@@ -70,11 +70,11 @@ class GaitSequenceLSTM(nn.Module):
 
         # Mean-pool over actual (non-padded) frames
         actual_len = lengths.unsqueeze(1).float().to(x.device)   # (B, 1)
-        pooled     = lstm_out.sum(dim=1) / actual_len             # (B, hidden_dim)
+        pooled = lstm_out[:, -1, :]             # (B, hidden_dim)
 
         return self.proj(pooled)   # (B, 64)
 
-
+"""
 # ── Quick test ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -98,4 +98,4 @@ if __name__ == "__main__":
     out = lstm(dummy_kp, dummy_len)
     print(f"\nInput  : {dummy_kp.shape}  (B, T, {LSTM_INPUT_DIM})")
     print(f"Output : {out.shape}  → (B, 64) ready for fusion with MLP (B, 64)")
-    print("✓ LSTM compiled")
+    print("✓ LSTM compiled")"""

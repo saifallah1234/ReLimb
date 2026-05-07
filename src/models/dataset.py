@@ -1,84 +1,139 @@
 import json
+import sys
 import torch
 import numpy as np
+import pandas as pd  # <--- Added pandas for robust NaN interpolation
 from pathlib import Path
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.features.preprocessing import hip_center_keypoints
+
+# ---> ADDED CLEANING FUNCTION <---
+def clean_keypoints(kp_array):
+    """
+    Fills NaN values in a (Frames, 66) array to prevent LSTM gradient explosion.
+    1. Interpolates missing frames in the middle (draws a line between known points).
+    2. Backward fills NaNs at the start (simulates person standing still before entering).
+    3. Forward fills NaNs at the end.
+    4. Fills with 0.0 only as an absolute last resort.
+    """
+    df = pd.DataFrame(kp_array)
+    df = df.interpolate(method='linear', limit_direction='both')
+    df = df.bfill()
+    df = df.ffill()
+    df = df.fillna(0.0)
+    return df.to_numpy(dtype=np.float32)
+
+
 class ProGaitDataset(Dataset):
     def __init__(self):
-        self.project_root = Path(__file__).resolve().parent.parent.parent
+        self.project_root = PROJECT_ROOT
         self.sessions_dir = self.project_root / "data" / "sessions"
+        if not self.sessions_dir.exists():
+            self.sessions_dir = self.project_root / "data" / "session"
         self.index_file = self.project_root / "data" / "raw_videos" / "hf" / "dataset_index.json"
         self.mapping_file = self.project_root / "data" / "class_mapping.json"
-        
+
+        # Load mappings
         with open(self.mapping_file, 'r', encoding='utf-8') as f:
             self.class_mapping = json.load(f)
-            
+
         with open(self.index_file, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
-            
-        self.valid_sessions = []
-        
+
+        # Build lookup
+        self.meta_lookup = {}
         for item in metadata:
             raw_id = item["ID"]
             clean_id = raw_id.replace(".mp4", "").replace(".avi", "")
-            
-            # Construct both possible folder names
-            folder_inside = f"inside_{clean_id}"
-            folder_outside = f"outside_{clean_id}"
-            
-            kp_path_inside = self.sessions_dir / folder_inside / "keypoints.npy"
-            kp_path_outside = self.sessions_dir / folder_outside / "keypoints.npy"
-            
-            # Check which one actually exists and save that specific folder name
-            if kp_path_inside.exists():
-                item["actual_folder_name"] = folder_inside
-                self.valid_sessions.append(item)
-            elif kp_path_outside.exists():
-                item["actual_folder_name"] = folder_outside
-                self.valid_sessions.append(item)
+            self.meta_lookup[clean_id] = item
 
-        print(f"✅ PyTorch Dataset Initialized: {len(self.valid_sessions)} valid videos ready for training.")
+        self.valid_sessions = []
+
+        if not self.sessions_dir.exists():
+            raise FileNotFoundError("Could not find data/sessions or data/session")
+
+        print("\nScanning session folders...")
+
+        for folder in self.sessions_dir.iterdir():
+            if not folder.is_dir() or "_clip_" not in folder.name:
+                continue
+
+            kp_path = folder / "keypoints.npy"
+            if not kp_path.exists():
+                continue
+
+            parts = folder.name.split("_clip_")[0]
+            clean_id = parts.replace("inside_", "").replace("outside_", "")
+
+            meta = self.meta_lookup.get(clean_id, None)
+
+            if meta is None:
+                issue_text = "Unknown / Other"
+                ccc_score = 0.0
+                metrics = np.zeros(6, dtype=np.float32)
+            else:
+                issue_text = meta.get("clean_primary_issue") or "Unknown / Other"
+                ccc_score = float(meta.get("ccc_score") or 0.0)
+
+                # ✔ REAL METRICS (NO per-sample normalization)
+                metrics = np.array([
+                    meta.get("cadence_bpm", 0.0),
+                    meta.get("step_count", 0.0),
+                    meta.get("stride_time_avg_l", 0.0),
+                    meta.get("stride_time_avg_r", 0.0),
+                    meta.get("stride_time_asymmetry", 0.0),
+                    meta.get("step_length_pixel_avg", 0.0),
+                ], dtype=np.float32)
+
+            self.valid_sessions.append({
+                "folder": folder,
+                "issue_text": issue_text,
+                "ccc_score": ccc_score,
+                "metrics": metrics
+            })
+
+        print(f"✅ Dataset ready: {len(self.valid_sessions)} clips loaded.")
 
     def __len__(self):
         return len(self.valid_sessions)
 
     def __getitem__(self, idx):
         item = self.valid_sessions[idx]
-        
-        # Use the exact folder name we found during __init__
-        session_folder_name = item["actual_folder_name"]
-        session_folder = self.sessions_dir / session_folder_name
-        
-        # ---------------------------------------------------------
-        # A. LOAD INPUTS
-        # ---------------------------------------------------------
+        session_folder = item["folder"]
+
+        # 1. Load raw keypoints
         kp_path = session_folder / "keypoints.npy"
-        keypoints = np.load(kp_path)
-        keypoints = np.nan_to_num(keypoints, nan=0.0) 
-        keypoints_tensor = torch.tensor(keypoints, dtype=torch.float32)
+        keypoints = np.load(kp_path).astype(np.float32)
         
-        # Updated placeholder: 5 zeros for metrics, 5 zeros for flags
-        metrics_tensor = torch.zeros(10, dtype=torch.float32)
+        # 2. Clean NaNs using the new pandas logic BEFORE standardizing
+        keypoints = clean_keypoints(keypoints)
         
-        # ---------------------------------------------------------
-        # B. LOAD TARGETS 
-        # ---------------------------------------------------------
-        ccc_score = float(item.get("ccc_score", 0.0))
-        ccc_tensor = torch.tensor([ccc_score], dtype=torch.float32)
-        
-        issue_text = item.get("clean_primary_issue", "Unknown / Other")
-        issue_idx = self.class_mapping.get(issue_text, self.class_mapping.get("Unknown / Other", 0))
-        issue_tensor = torch.tensor(issue_idx, dtype=torch.long)
-        
-        return keypoints_tensor, metrics_tensor, ccc_tensor, issue_tensor
+        # 3. Center keypoints 
+        keypoints = hip_center_keypoints(keypoints)
+        keypoints = torch.tensor(keypoints, dtype=torch.float32)
+
+        # metrics (NO per-sample normalization)
+        metrics = torch.tensor(item["metrics"], dtype=torch.float32)
+
+        # targets
+        ccc = torch.tensor([item["ccc_score"]], dtype=torch.float32)
+
+        issue_idx = self.class_mapping.get(
+            item["issue_text"],
+            self.class_mapping.get("Unknown / Other", 0)
+        )
+        issue = torch.tensor(issue_idx, dtype=torch.long)
+
+        return keypoints, metrics, ccc, issue
+
 
 def pad_collate_fn(batch):
-    """
-    Combines a list of individual samples into a padded batch.
-    Required because Video A might be 150 frames and Video B might be 200 frames.
-    """
     keypoints_list, metrics_list, ccc_list, issue_list = [], [], [], []
     lengths_list = []
 
@@ -89,48 +144,38 @@ def pad_collate_fn(batch):
         issue_list.append(iss)
         lengths_list.append(kp.shape[0])
 
-    # Pad keypoints with 0.0 so all videos in the batch match the longest one
-    padded_keypoints = pad_sequence(keypoints_list, batch_first=True, padding_value=0.0)
-    
-    metrics_batch = torch.stack(metrics_list)
-    ccc_batch = torch.stack(ccc_list)
-    issue_batch = torch.stack(issue_list)
-    lengths_batch = torch.tensor(lengths_list, dtype=torch.long)
+    padded_keypoints = pad_sequence(
+        keypoints_list, batch_first=True, padding_value=0.0
+    )
 
-    return padded_keypoints, metrics_batch, ccc_batch, issue_batch, lengths_batch
+    return (
+        padded_keypoints,
+        torch.stack(metrics_list),
+        torch.stack(ccc_list),
+        torch.stack(issue_list),
+        torch.tensor(lengths_list, dtype=torch.long)
+    )
 
-# ... (Keep all the previous code above) ...
 
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
 
     print("\n--- Testing ProGaitDataset ---")
-    
-    # 1. Instantiate the dataset
+
     dataset = ProGaitDataset()
     
-    if len(dataset) == 0:
-        print("❌ Dataset is empty. Check your folder paths in __init__.")
-    else:
-        # 2. Create a DataLoader to test batching and padding
-        # batch_size=4 means we grab 4 videos at a time.
-        dataloader = DataLoader(
-            dataset, 
-            batch_size=4, 
-            shuffle=True, 
-            collate_fn=pad_collate_fn
-        )
-        
-        # 3. Grab exactly one batch
-        keypoints, metrics, ccc, issues, lengths = next(iter(dataloader))
-        
-        print("\n✅ Successfully loaded a batch! Here are the tensor shapes:")
-        print(f"Keypoints Batch : {keypoints.shape}  -> [Batch_Size, Max_Frames, 66 (Features)] (Type: {keypoints.dtype})")
-        print(f"Metrics Batch   : {metrics.shape}       -> [Batch_Size, 5 (Mocked Gait Metrics)] (Type: {metrics.dtype})")
-        print(f"CCC Score Batch : {ccc.shape}       -> [Batch_Size, 1] (Type: {ccc.dtype})")
-        print(f"Issues Batch    : {issues.shape}          -> [Batch_Size] (Type: {issues.dtype})")
-        print(f"True Lengths    : {lengths.shape}          -> [Batch_Size] (Values: {lengths.tolist()})")
-        
-        print("\n--- Sample Values from Batch ---")
-        print(f"CCC Scores      : {ccc.squeeze().tolist()}")
-        print(f"Issue Class IDs : {issues.tolist()}")
+    assert len(dataset) > 0, "Dataset empty"
+
+    loader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=pad_collate_fn)
+
+    kp, met, ccc, issue, lengths = next(iter(loader))
+
+    print("Keypoints:", kp.shape)
+    print("Metrics:", met.shape)
+    print("CCC:", ccc.shape)
+    print("Issues:", issue.shape)
+
+    assert not torch.isnan(kp).any(), "NaNs in keypoints"
+    assert met.shape[1] == 6, "Wrong metric size"
+
+    print("✔ Dataset OK")

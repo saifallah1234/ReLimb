@@ -10,10 +10,12 @@ from pathlib import Path
 SCRIPT_DIR   = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
+# 🎯 STRICT PATHS: Pointing exactly to root/data/..., completely avoiding src/
 DATA_DIR    = PROJECT_ROOT / 'data' / 'raw_videos' / 'hf'
 SESSION_DIR = PROJECT_ROOT / 'data' / 'sessions'
 
 # ── Parameters ─────────────────────────────────────────────────────────────
+TEST_LIMIT            = None   # Set to None to run on all videos
 T_TOLERANCE           = 0.2
 MIN_STEP_SEPARATION_S = 0.8
 BUTTER_ORDER          = 10
@@ -41,43 +43,26 @@ def detect_events_from_signal(signal, fps, min_separation_s=MIN_STEP_SEPARATION_
     troughs, _ = find_peaks(-signal, distance=min_dist, height=-height_threshold)
     return peaks, troughs
 
-# ── XML keypoint overlay ──────────────────────────────────────────────────
-
-def _apply_xml_overlay(keypoints_mp: np.ndarray, xml_path: Path) -> np.ndarray:
-    try:
-        from xml_loader import parse_xml
-    except ImportError:
-        print("  ⚠ xml_loader not found — skipping XML overlay")
-        return keypoints_mp
-
-    kp_xml, n_xml = parse_xml(xml_path)
-    n_mp  = keypoints_mp.shape[0]
-
-    if n_xml != n_mp:
-        print(f"  ⚠ Frame count mismatch: video={n_mp}, XML={n_xml}. Truncating.")
-        min_n = min(n_mp, n_xml)
-        keypoints_mp = keypoints_mp[:min_n]
-        kp_xml       = kp_xml[:min_n]
-
-    valid_mask = ~np.isnan(kp_xml)
-    keypoints_mp[valid_mask] = kp_xml[valid_mask]
-    print(f"  ✓ XML overlay applied: {valid_mask.sum()} values updated")
-    return keypoints_mp
 
 # ── Core processing ────────────────────────────────────────────────────────
 
-def process_video(video_path: Path, session_id: str, xml_path: Path | None = None, xml_only: bool = False):
-    if xml_only and xml_path is not None and xml_path.exists():
-        print(f"  ℹ xml_only=True — skipping MediaPipe")
+def process_video(video_path: Path, session_id: str, xml_path: Path | None = None):
+    # 1. 🌟 IF XML EXISTS: Use the high-quality smoothed CVAT annotations!
+    if xml_path and xml_path.exists():
+        print(f"  ⭐ XML found! Using high-quality smoothed annotations.")
         from xml_loader import load_xml_session
         fps = 25.0
         cap = cv.VideoCapture(str(video_path))
         if cap.isOpened():
             fps = cap.get(cv.CAP_PROP_FPS) or 25.0
             cap.release()
+            
+        # This calls your newly updated xml_loader.py (which handles the overwrite natively)
         load_xml_session(xml_path, session_id, fps=fps, save=True)
         return
 
+    # 2. 🤖 IF NO XML: Fallback to high-accuracy MediaPipe
+    print(f"  🤖 No XML found. Falling back to AI extraction (MediaPipe).")
     cap = cv.VideoCapture(str(video_path))
     if not cap.isOpened():
         print(f"  ✗ Cannot open: {video_path}")
@@ -87,29 +72,26 @@ def process_video(video_path: Path, session_id: str, xml_path: Path | None = Non
     frame_count = int(cap.get(cv.CAP_PROP_FRAME_COUNT) or 0)
     print(f"  FPS={fps:.1f}  frames={frame_count}")
 
-    detector = PoseDetector(staticMode=False, modelComplexity=1, smoothLandmarks=True, 
-                            enableSegmentation=False, detectionCon=0.5, trackCon=0.5)
+    # Upgraded complexity to 2 for much better clinical tracking
+    detector = PoseDetector(staticMode=False, modelComplexity=2, smoothLandmarks=True, 
+                            enableSegmentation=False, detectionCon=0.6, trackCon=0.6)
 
     left_hip_x, left_foot_x, right_hip_x, right_foot_x = [], [], [], []
     keypoint_rows = []
 
-    frame_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret: break
-        frame_idx += 1
 
-        # 1. PRE-INITIALIZE (Fixes the "Undefined" error)
         lh_x = lf_x = rh_x = rf_x = np.nan
         kp_row = np.full(66, np.nan, dtype=np.float32)
 
         frame = cv.resize(frame, (640, 480))
-        frame = detector.findPose(frame)
+        # draw=False makes extraction massively faster
+        frame = detector.findPose(frame, draw=False)
         lmList, _ = detector.findPosition(frame, draw=False, bboxWithHands=False)
 
-        # 2. EXTRACT
         if lmList:
-            # Fill the 66-column row
             for lm_i in range(min(len(lmList), 33)):
                 kp_row[lm_i * 2]     = lmList[lm_i][0]
                 kp_row[lm_i * 2 + 1] = lmList[lm_i][1]
@@ -129,7 +111,7 @@ def process_video(video_path: Path, session_id: str, xml_path: Path | None = Non
 
     cap.release()
 
-    # 3. SIGNAL PROCESSING
+    # 3. SIGNAL PROCESSING (For AI keypoints)
     lh = interp_nan(np.array(left_hip_x,   dtype=np.float64))
     lf = interp_nan(np.array(left_foot_x,  dtype=np.float64))
     rh = interp_nan(np.array(right_hip_x,  dtype=np.float64))
@@ -149,10 +131,8 @@ def process_video(video_path: Path, session_id: str, xml_path: Path | None = Non
     peaks_right,  troughs_right = detect_events_from_signal(right_filt, fps)
 
     keypoints_array = np.stack(keypoint_rows, axis=0).astype(np.float32)
-    if xml_path and xml_path.exists():
-        keypoints_array = _apply_xml_overlay(keypoints_array, xml_path)
 
-    # 4. SAVE
+    # 4. SAVE (Force Overwrite)
     session_folder = SESSION_DIR / session_id
     session_folder.mkdir(parents=True, exist_ok=True)
 
@@ -164,35 +144,45 @@ def process_video(video_path: Path, session_id: str, xml_path: Path | None = Non
 
     pd.DataFrame(rows).to_csv(session_folder / 'detected_events.csv', index=False)
     np.save(str(session_folder / 'keypoints.npy'), keypoints_array)
+    print(f"  💾 Overwritten MediaPipe Keypoints & Events to {session_folder}")
+
 
 def main():
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     video_extensions = {'.mp4', '.avi', '.mov', '.mkv'}
-    video_paths = sorted([p for p in DATA_DIR.rglob('*') if p.suffix.lower() in video_extensions])
+    
+    # 1. Get all clips
+    all_video_paths = sorted([p for p in DATA_DIR.rglob('*') if p.suffix.lower() in video_extensions])
+    video_paths = [p for p in all_video_paths if "clip" in p.name.lower()]
+    
+    print(f"📂 Total clips found on disk: {len(video_paths)}")
 
-    if not video_paths: return
+    # APPLY TEST LIMIT
+    if TEST_LIMIT is not None:
+        video_paths = video_paths[:TEST_LIMIT]
+        print(f"⚠️ TESTING MODE: Limiting execution to first {TEST_LIMIT} videos.")
+
+    processed_count = 0
 
     for video_path in video_paths:
         relative_path = video_path.relative_to(DATA_DIR)
         session_id = "_".join(relative_path.with_suffix('').parts)
         
-        print(f"▶ {relative_path}  →  session: {session_id}")
+        # Note: Resume logic removed. It will overwrite every time now.
 
-        # --- UPDATED LOGIC HERE ---
-        # Instead of just .xml, look for [video_name]_annotations.xml
+        print(f"\n▶ Processing ({processed_count + 1}/{len(video_paths)}): {video_path.name}")
+
         xml_name = video_path.stem + "_annotations.xml"
         xml_candidate = video_path.parent / xml_name
-        
         xml_path = xml_candidate if xml_candidate.exists() else None
-        
-        if xml_path:
-            print(f"   ✓ Found matching annotation: {xml_name}")
-        # --------------------------
         
         try:
             process_video(video_path, session_id, xml_path=xml_path)
+            processed_count += 1
         except Exception as e:
             print(f"   ❌ Error: {e}")
+
+    print(f"\n✅ Done! Successfully processed and overwritten: {processed_count} clips.")
 
 if __name__ == '__main__':
     main()

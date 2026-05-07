@@ -1,0 +1,10 @@
+class,Alignment/Varus/Valgus Issue,Knee Flexion/Extension Issue,Normal Gait,Prosthesis Length Issue,Step Dimensions Issue,Terminal Impact / Foot Issue,Toe-Out / Rotation Issue,Unknown / Other,Whip / Circumduction
+Alignment/Varus/Valgus Issue,7,4,2,1,0,2,0,3,0
+Knee Flexion/Extension Issue,6,10,1,1,0,4,1,0,0
+Normal Gait,0,1,6,5,0,8,2,11,0
+Prosthesis Length Issue,1,1,2,7,0,2,1,8,0
+Step Dimensions Issue,4,7,7,6,0,19,3,34,0
+Terminal Impact / Foot Issue,1,5,1,0,0,9,3,3,0
+Toe-Out / Rotation Issue,1,9,2,7,0,4,3,9,0
+Unknown / Other,0,0,4,2,0,2,0,17,0
+Whip / Circumduction,7,7,12,17,0,17,5,18,0
