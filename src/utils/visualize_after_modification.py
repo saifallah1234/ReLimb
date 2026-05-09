@@ -2,14 +2,14 @@
 visualize_after_modification.py
 ===============================
 Plays back random processed ReLimb sessions on a BLACK background. 
-Overlays the smoothed keypoints (skeleton) and flashes gait events on screen.
+Overlays the NORMALIZED smoothed keypoints (skeleton) and flashes gait events.
 """
 
 import cv2
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import random  # <--- Added to pick random clips
+import random
 
 # ── Project layout ─────────────────────────────────────────────────────────
 SCRIPT_DIR   = Path(__file__).resolve().parent
@@ -17,8 +17,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent
 SESSION_DIR  = PROJECT_ROOT / 'data' / 'sessions'
 
 POSE_CONNECTIONS = [
- (11, 12), (11, 13), (12, 14),
-    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26), (25, 27), (26, 28),
+  (23, 24), (23, 25), (24, 26), (25, 27), (26, 28),
     (27, 29), (28, 30), (29, 31), (30, 32), (27, 31), (28, 32)
 ]
 
@@ -29,15 +28,14 @@ def visualize_session(session_id: str):
         print(f"⏭️  Skipping {session_id} (Folder does not exist: {session_folder})")
         return True
 
-    # 💡 SMART FILE DISCOVERY: Grab whatever .npy and .csv files exist!
-    npy_files = list(session_folder.glob("*.npy"))
+    # 🎯 TARGET NORMALIZED KEYPOINTS SPECIFICALLY
+    kp_path = session_folder / "keypoints_normalized.npy"
     csv_files = list(session_folder.glob("*.csv"))
 
-    if not npy_files or not csv_files:
-        print(f"⏭️  Skipping {session_id} (Missing files in {session_folder})")
+    if not kp_path.exists() or not csv_files:
+        print(f"⏭️  Skipping {session_id} (Missing normalized keypoints or CSV in {session_folder})")
         return True
 
-    kp_path = npy_files[0]
     ev_path = csv_files[0]
 
     # Load data
@@ -53,46 +51,46 @@ def visualize_session(session_id: str):
     print(f"  Loaded Events: {ev_path.name}")
     print("  Controls: [Q] Skip clip  |  [ESC] Quit completely  |  [SPACE] Pause")
 
-    # Dynamically size the internal canvas based on coordinates so nothing gets cut off
-    try:
-        max_x = np.nanmax(keypoints[:, 0::2])
-        max_y = np.nanmax(keypoints[:, 1::2])
-        canvas_w = max(int(max_x) + 100, 1280)
-        canvas_h = max(int(max_y) + 100, 720)
-    except:
-        canvas_w, canvas_h = 1920, 1080 # Fallback
-
-    window_name = "ReLimb - Gait Event Viewer (Black Canvas)"
+    canvas_w, canvas_h = 1280, 720
     
-    # 💡 Setup a resizable window and make it smaller on the screen (800x600)
+    offset_x = canvas_w // 2
+    offset_y = canvas_h // 2
+    
+    # 💡 Multiply the 1.0 scale data by 200 so we can actually see it on screen
+    visual_scale = 200 
+
+    window_name = "ReLimb - Gait Event Viewer (Normalized Treadmill)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 800, 600)
 
     while frame_idx < num_frames:
         if not paused:
-            # Create a pure black frame
             frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-            
-            # Check for events in this frame
             current_events = events_df[events_df['frame'] == frame_idx]
-            
-            # Draw Skeleton
             kp_row = keypoints[frame_idx]
             
             # Draw Bones
             for connection in POSE_CONNECTIONS:
                 pt1_idx, pt2_idx = connection
-                x1, y1 = kp_row[pt1_idx * 2], kp_row[pt1_idx * 2 + 1]
-                x2, y2 = kp_row[pt2_idx * 2], kp_row[pt2_idx * 2 + 1]
+                
+                # Multiply by visual_scale, THEN add offset!
+                x1 = (kp_row[pt1_idx * 2] * visual_scale) + offset_x
+                y1 = (kp_row[pt1_idx * 2 + 1] * visual_scale) + offset_y
+                x2 = (kp_row[pt2_idx * 2] * visual_scale) + offset_x
+                y2 = (kp_row[pt2_idx * 2 + 1] * visual_scale) + offset_y
                 
                 if not (np.isnan(x1) or np.isnan(y1) or np.isnan(x2) or np.isnan(y2)):
                     cv2.line(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 255, 255), 2)
             
             # Draw Joints
             for i in range(33):
-                x, y = kp_row[i * 2], kp_row[i * 2 + 1]
+                x = (kp_row[i * 2] * visual_scale) + offset_x
+                y = (kp_row[i * 2 + 1] * visual_scale) + offset_y
                 if not (np.isnan(x) or np.isnan(y)):
                     cv2.circle(frame, (int(x), int(y)), 4, (0, 255, 255), -1)
+
+            # Draw a subtle "ground/treadmill" line for visual reference
+            cv2.line(frame, (100, offset_y), (canvas_w - 100, offset_y), (50, 50, 50), 1)
 
             # Overlay Event Text
             y_offset = 80

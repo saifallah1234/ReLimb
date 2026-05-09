@@ -52,6 +52,26 @@ def make_sampler(labels: list[int]) -> WeightedRandomSampler:
     return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
 
+# ── 1. NEW SMART CLASSIFIER THAT TAKES METRICS ───────────────────────
+class MetricFusedClassifier(nn.Module):
+    def __init__(self, lstm_dim=64, metric_dim=6, head_dim=64, num_classes=5, dropout=0.3):
+        super().__init__()
+        # BatchNorm scales the massive cadence/step numbers safely!
+        self.metric_norm = nn.BatchNorm1d(metric_dim) 
+        self.fc = nn.Sequential(
+            nn.Linear(lstm_dim + metric_dim, head_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(head_dim, num_classes),
+        )
+
+    def forward(self, lstm_feats, raw_metrics):
+        norm_metrics = self.metric_norm(raw_metrics)
+        combined = torch.cat([lstm_feats, norm_metrics], dim=1)
+        return self.fc(combined)
+# ─────────────────────────────────────────────────────────────────────
+
+
 def run_training(epochs, lr, batch_size, n_splits, seed, label_smoothing, head_dim, dropout):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device : {device.type.upper()}")
@@ -99,11 +119,14 @@ def run_training(epochs, lr, batch_size, n_splits, seed, label_smoothing, head_d
             shuffle=False, collate_fn=pad_collate_fn,
         )
 
-        encoder    = GaitSequenceLSTM().to(device)
-        classifier = nn.Sequential(
-            nn.Linear(64, head_dim), nn.GELU(), nn.Dropout(dropout),
-            nn.Linear(head_dim, num_classes),
+        encoder = GaitSequenceLSTM().to(device)
+        
+        # ── 2. INITIALIZE THE NEW CLASSIFIER ─────────────────────────
+        classifier = MetricFusedClassifier(
+            lstm_dim=64, metric_dim=6, head_dim=head_dim, 
+            num_classes=num_classes, dropout=dropout
         ).to(device)
+        # ─────────────────────────────────────────────────────────────
 
         optimizer = torch.optim.AdamW(
             list(encoder.parameters()) + list(classifier.parameters()),
@@ -119,10 +142,33 @@ def run_training(epochs, lr, batch_size, n_splits, seed, label_smoothing, head_d
             # ── train ────────────────────────────────────────────────────
             encoder.train(); classifier.train()
             tr_loss = correct = total = 0
-            for kp, _, _, issue, lengths in train_loader:
-                kp, issue, lengths = kp.to(device), issue.to(device), lengths.to(device)
+            
+            # ── 3. FINALLY CAPTURING THE METRICS ─────────────────────────
+            for batch_idx, (kp, metrics, ccc, issue, lengths) in enumerate(train_loader):
+                kp, metrics, issue, lengths = kp.to(device), metrics.to(device), issue.to(device), lengths.to(device)
+                
+                # 🔍 --- THE X-RAY: PRINT ONLY THE VERY FIRST BATCH --- 🔍
+                if epoch == 1 and batch_idx == 0:
+                    print("\n" + "="*50)
+                    print("🧠 MODEL X-RAY (BATCH 1)")
+                    print("="*50)
+                    print(f"1. Keypoints Input : Min {kp.min().item():.3f} | Max {kp.max().item():.3f}")
+                    print(f"2. Metrics Input   : {metrics[0].tolist()}") 
+                    with torch.no_grad():
+                        lstm_feat = encoder(kp, lengths)
+                        print(f"3. LSTM Output     : Min {lstm_feat.min().item():.3f} | Max {lstm_feat.max().item():.3f}")
+                        logits = classifier(lstm_feat, metrics)
+                        print(f"4. Actual Labels   : {issue.tolist()}")
+                        print(f"5. Predictions     : {logits.argmax(1).tolist()}")
+                    print("="*50 + "\n")
+                # 🔍 -------------------------------------------------- 🔍
+
                 optimizer.zero_grad()
-                logits = classifier(encoder(kp, lengths))
+                
+                # ── 4. FEEDING BOTH LSTM & METRICS ───────────────────────
+                lstm_out = encoder(kp, lengths)
+                logits   = classifier(lstm_out, metrics)
+                
                 loss   = criterion(logits, issue)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -138,9 +184,13 @@ def run_training(epochs, lr, batch_size, n_splits, seed, label_smoothing, head_d
             encoder.eval(); classifier.eval()
             fold_true, fold_pred = [], []
             with torch.no_grad():
-                for kp, _, _, issue, lengths in val_loader:
-                    kp, issue, lengths = kp.to(device), issue.to(device), lengths.to(device)
-                    logits = classifier(encoder(kp, lengths))
+                # ── 5. CAPTURING METRICS IN VALIDATION TOO ───────────────
+                for kp, metrics, ccc, issue, lengths in val_loader:
+                    kp, metrics, issue, lengths = kp.to(device), metrics.to(device), issue.to(device), lengths.to(device)
+                    
+                    lstm_out = encoder(kp, lengths)
+                    logits   = classifier(lstm_out, metrics)
+                    
                     fold_true.extend(issue.tolist())
                     fold_pred.extend(logits.argmax(1).tolist())
 

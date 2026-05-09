@@ -12,7 +12,18 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.features.preprocessing import hip_center_keypoints
+from src.models.model_lstm import GAIT_LANDMARK_INDICES
 
+def filter_gait_keypoints(kp_array):
+    """
+    Slices the full 66-feature array down to just the specific features 
+    required by the LSTM, ignoring the empty face/hands.
+    """
+    out = np.zeros((kp_array.shape[0], len(GAIT_LANDMARK_INDICES) * 2), dtype=np.float32)
+    for i, lm in enumerate(GAIT_LANDMARK_INDICES):
+        out[:, i*2]   = kp_array[:, lm*2]
+        out[:, i*2+1] = kp_array[:, lm*2+1]
+    return out
 # ---> ADDED CLEANING FUNCTION <---
 def clean_keypoints(kp_array):
     """
@@ -64,7 +75,7 @@ class ProGaitDataset(Dataset):
             if not folder.is_dir() or "_clip_" not in folder.name:
                 continue
 
-            kp_path = folder / "keypoints.npy"
+            kp_path = folder / "keypoints_normalized.npy"
             if not kp_path.exists():
                 continue
 
@@ -107,27 +118,26 @@ class ProGaitDataset(Dataset):
         item = self.valid_sessions[idx]
         session_folder = item["folder"]
 
-        # 1. Load raw keypoints
-        kp_path = session_folder / "keypoints.npy"
+        # 1. Load the already-perfected normalized keypoints (Shape: 66)
+        kp_path = session_folder / "keypoints_normalized.npy"
         keypoints = np.load(kp_path).astype(np.float32)
         
-        # 2. Clean NaNs using the new pandas logic BEFORE standardizing
+        # 2. Clean NaNs
         keypoints = clean_keypoints(keypoints)
         
-        # 3. Center keypoints 
-        keypoints = hip_center_keypoints(keypoints)
+        # 3. FILTER down to just the leg/hip/shoulder features! (Shape: 26)
+        keypoints = filter_gait_keypoints(keypoints)
+
+        
+        
         keypoints = torch.tensor(keypoints, dtype=torch.float32)
 
-        # metrics (NO per-sample normalization)
+        # 3. Load metrics
         metrics = torch.tensor(item["metrics"], dtype=torch.float32)
 
-        # targets
+        # 4. Targets
         ccc = torch.tensor([item["ccc_score"]], dtype=torch.float32)
-
-        issue_idx = self.class_mapping.get(
-            item["issue_text"],
-            self.class_mapping.get("Unknown / Other", 0)
-        )
+        issue_idx = self.class_mapping.get(item["issue_text"], self.class_mapping.get("Unknown / Other", 0))
         issue = torch.tensor(issue_idx, dtype=torch.long)
 
         return keypoints, metrics, ccc, issue

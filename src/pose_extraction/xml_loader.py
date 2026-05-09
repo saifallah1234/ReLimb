@@ -29,7 +29,6 @@ PROGAIT_TO_MEDIAPIPE: dict[str, int | None] = {
     "7":  11,   # right shoulder
     "8":  14,   # left elbow
     "9":  13,   # right elbow
-    "11": None,   # right hip
     "12": 24,   # left hip
     "13": 23,   # right knee
     "14": 26,   # left knee
@@ -60,28 +59,29 @@ MIN_STEP_SEPARATION_S = 0.8
 def apply_progait_smoothing(keypoints_66: np.ndarray, lam: float = 10.0) -> np.ndarray:
     """
     Applies the original make_smoothing_spline fix to remove human annotation jitter.
-    1. Fills missing CVAT frames (NaNs) via interpolation.
-    2. Runs the spline smoothing on all 66 coordinate channels.
+    Leaves completely untracked points (faces/hands) as NaN so they don't break normalization.
     """
-    # 1. Fill NaNs using pandas
+    # 1. Fill missing frames using pandas, BUT leave entirely empty columns as NaN
     df = pd.DataFrame(keypoints_66)
     df = df.interpolate(method='linear', limit_direction='both')
-    df = df.bfill().ffill().fillna(0.0)
+    
+    # REMOVED .fillna(0.0) so unused points stay as NaN!
+    df = df.bfill().ffill() 
     clean_kp = df.to_numpy(dtype=np.float32)
 
     # 2. Apply Spline Smoothing
     t = np.arange(clean_kp.shape[0])
-    smoothed = np.zeros_like(clean_kp)
+    
+    # Start with an array entirely filled with NaNs
+    smoothed = np.full_like(clean_kp, np.nan, dtype=np.float32)
 
     for i in range(66):
-        # Only smooth if the coordinate line isn't totally dead/zero
-        if np.any(clean_kp[:, i]):
+        # Only smooth if the column actually has real data (is not completely NaN)
+        if not np.all(np.isnan(clean_kp[:, i])):
             spline = make_smoothing_spline(t, clean_kp[:, i], lam=lam)
             smoothed[:, i] = spline(t)
-        else:
-            smoothed[:, i] = clean_kp[:, i]
 
-    return smoothed.astype(np.float32)
+    return smoothed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
