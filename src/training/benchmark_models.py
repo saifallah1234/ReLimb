@@ -1,115 +1,107 @@
 """
-benchmark.py
-============
-Runs LSTM-only and LSTM-pretrained training back to back and
-prints a side-by-side comparison of macro F1 scores.
-
-Usage
------
-    python src/models/benchmark.py
-    python src/models/benchmark.py --epochs 50 --n_splits 5 --batch_size 16
+benchmark_models.py
+===================
+Runs ST-GCN and LSTM training back-to-back with the same CLI parameters,
+then prints a simple comparison of best validation accuracy.
 """
 
 import argparse
 from datetime import datetime
-from pathlib import Path
 
-import mlflow
-
-from train_lstm_only       import run_training as run_lstm
-from train_lstm_pretrained import run_training as run_lstm_pretrained
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-
-def _start_mlflow(experiment: str = "ReLimb Benchmark") -> None:
-    mlflow.set_tracking_uri(f"file:///{REPO_ROOT / 'mlruns'}")
-    mlflow.set_experiment(experiment)
-
-
-def _log(metrics: dict | None) -> None:
-    if metrics and mlflow.active_run():
-        for k, v in metrics.items():
-            mlflow.log_metric(k, float(v))
+from src.training.train_lstm import run_training as run_lstm
+from src.training.train_stgcn import run_training as run_stgcn
 
 
 def benchmark(
-    epochs:          int,
-    lr:              float,
-    batch_size:      int,
-    n_splits:        int,
-    seed:            int,
-    label_smoothing: float,
-    head_dim:        int,
-    dropout:         float,
-    freeze_epochs:   int,
+    epochs: int,
+    lr: float,
+    batch_size: int,
+    val_split: float,
+    seed: int,
+    max_batches: int | None,
+    cap_train: str,
+    cap_val: str,
+    labels: str,
+    head_dim: int,
+    dropout: float,
 ) -> None:
     print("\n" + "=" * 55)
-    print("  ReLimb Benchmark")
+    print("  ReLimb Benchmark (ST-GCN vs LSTM)")
     print(f"  {datetime.now().isoformat(timespec='seconds')}")
     print("=" * 55)
 
     shared = dict(
-        epochs=epochs, lr=lr, batch_size=batch_size,
-        n_splits=n_splits, seed=seed,
-        label_smoothing=label_smoothing,
-        head_dim=head_dim, dropout=dropout,
+        epochs=epochs,
+        lr=lr,
+        batch_size=batch_size,
+        val_split=val_split,
+        seed=seed,
+        max_batches=max_batches,
+        cap_train=cap_train,
+        cap_val=cap_val,
+        labels=labels,
     )
 
-    # ── Run 1: LSTM only ──────────────────────────────────────────────────
-    print("\n─── LSTM ONLY ───────────────────────────────────────")
-    _start_mlflow()
-    with mlflow.start_run(run_name="lstm_only"):
-        mlflow.log_params({"model": "lstm_only", **shared})
-        metrics_lstm = run_lstm(**shared)
-        _log(metrics_lstm)
+    print("\n─── ST-GCN ───────────────────────────────────────")
+    metrics_stgcn = run_stgcn(**shared)
 
-    # ── Run 2: LSTM pretrained ────────────────────────────────────────────
-    print("\n─── LSTM PRETRAINED (freeze→fine-tune) ──────────────")
-    _start_mlflow()
-    with mlflow.start_run(run_name="lstm_pretrained"):
-        mlflow.log_params({"model": "lstm_pretrained", "freeze_epochs": freeze_epochs, **shared})
-        metrics_pre = run_lstm_pretrained(**shared, freeze_epochs=freeze_epochs)
-        _log(metrics_pre)
+    print("\n─── LSTM ─────────────────────────────────────────")
+    metrics_lstm = run_lstm(**shared, head_dim=head_dim, dropout=dropout)
 
-    # ── Summary ───────────────────────────────────────────────────────────
-    f1_lstm = metrics_lstm.get("val_f1_macro", 0.0) if metrics_lstm else 0.0
-    f1_pre  = metrics_pre.get("val_f1_macro",  0.0) if metrics_pre  else 0.0
-    winner  = "LSTM Pretrained" if f1_pre > f1_lstm else "LSTM Only"
+    stgcn_acc = (metrics_stgcn or {}).get("best_val_acc", 0.0)
+    lstm_acc = (metrics_lstm or {}).get("best_val_acc", 0.0)
+    winner = "ST-GCN" if stgcn_acc > lstm_acc else "LSTM"
 
     print("\n" + "=" * 55)
-    print("  BENCHMARK RESULTS  (macro F1 across all folds)")
+    print("  BENCHMARK RESULTS  (best val accuracy)")
     print("=" * 55)
-    print(f"  LSTM Only        : {f1_lstm:.4f}")
-    print(f"  LSTM Pretrained  : {f1_pre:.4f}")
-    print(f"  Winner           : {winner}")
+    print(f"  ST-GCN : {stgcn_acc:.2f}%")
+    print(f"  LSTM   : {lstm_acc:.2f}%")
+    print(f"  Winner : {winner}")
     print("=" * 55)
-    print(f"\nMLflow runs logged to: {REPO_ROOT / 'mlruns'}")
-    print("View with:  mlflow ui --backend-store-uri mlruns")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ReLimb model benchmark")
-    parser.add_argument("--epochs",          type=int,   default=50)
-    parser.add_argument("--lr",              type=float, default=1e-3)
-    parser.add_argument("--batch_size",      type=int,   default=16)
-    parser.add_argument("--n_splits",        type=int,   default=5)
-    parser.add_argument("--seed",            type=int,   default=42)
-    parser.add_argument("--label_smoothing", type=float, default=0.1)
-    parser.add_argument("--head_dim",        type=int,   default=64)
-    parser.add_argument("--dropout",         type=float, default=0.3)
-    parser.add_argument("--freeze_epochs",   type=int,   default=20,
-                        help="Epochs to freeze encoder before fine-tuning (pretrained run only)")
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--val_split", type=float, default=0.2)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max_batches", type=int, default=0)
+    parser.add_argument(
+        "--cap_train",
+        type=str,
+        default="",
+        help="Comma-separated per-class caps for train split. Example: 'Knee Issue=300,Unknown / Other=300'.",
+    )
+    parser.add_argument(
+        "--cap_val",
+        type=str,
+        default="",
+        help="Comma-separated per-class caps for val split. Same format as --cap_train.",
+    )
+    parser.add_argument(
+        "--labels",
+        type=str,
+        default="",
+        help="Comma-separated class names to restrict training/eval to (and remap to 0..K-1).",
+    )
+    parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument("--dropout", type=float, default=0.3)
+
     args = parser.parse_args()
 
     benchmark(
-        epochs          = args.epochs,
-        lr              = args.lr,
-        batch_size      = args.batch_size,
-        n_splits        = args.n_splits,
-        seed            = args.seed,
-        label_smoothing = args.label_smoothing,
-        head_dim        = args.head_dim,
-        dropout         = args.dropout,
-        freeze_epochs   = args.freeze_epochs,
+        epochs=args.epochs,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        val_split=args.val_split,
+        seed=args.seed,
+        max_batches=args.max_batches or None,
+        cap_train=args.cap_train,
+        cap_val=args.cap_val,
+        labels=args.labels,
+        head_dim=args.head_dim,
+        dropout=args.dropout,
     )

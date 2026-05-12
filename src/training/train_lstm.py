@@ -1,8 +1,17 @@
+"""
+train_lstm.py
+=============
+LSTM training entrypoint aligned with train_stgcn parameters:
+- group-aware split (no leakage)
+- optional label restriction/remapping (--labels)
+- optional per-class caps (--cap_train/--cap_val)
+- single train/val split (no KFold)
+"""
+
 import argparse
+import sys
 from pathlib import Path
 from collections import Counter
-import sys
-
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -11,20 +20,17 @@ if str(PROJECT_ROOT) not in sys.path:
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-
 from sklearn.metrics import confusion_matrix, classification_report
 
 from src.models.dataset import ProGaitDataset, pad_collate_fn
-from src.models.model_stgcn import GaitSTGCN
-from torch.utils.data import WeightedRandomSampler
+from src.models.model_lstm import GaitSequenceLSTM
+
+MODELS_DIR = PROJECT_ROOT / "data" / "models"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class RemappedSubset(torch.utils.data.Dataset):
-    """Subset of an existing dataset with label remapping.
-
-    Expects the wrapped dataset to return: (keypoints, metrics, ccc, issue)
-    and rewrites `issue` according to `old_to_new`.
-    """
+    """Subset of an existing dataset with label remapping."""
 
     def __init__(self, dataset: torch.utils.data.Dataset, indices: list[int], old_to_new: dict[int, int]):
         self.dataset = dataset
@@ -38,35 +44,15 @@ class RemappedSubset(torch.utils.data.Dataset):
         keypoints, metrics, ccc, issue = self.dataset[self.indices[idx]]
         old = int(issue.item())
         if old not in self.old_to_new:
-            raise KeyError(f"Label id {old} not in remap (this sample should have been filtered out).")
+            raise KeyError("Label id not in remap (sample should have been filtered out).")
         return keypoints, metrics, ccc, torch.tensor(self.old_to_new[old], dtype=torch.long)
-
-def split_indices(n_items: int, val_split: float, seed: int):
-    generator = torch.Generator().manual_seed(seed)
-
-    indices = torch.randperm(n_items, generator=generator).tolist()
-
-    val_size = max(1, int(n_items * val_split))
-
-    val_idx = indices[:val_size]
-    train_idx = indices[val_size:]
-
-    return train_idx, val_idx
 
 
 def _extract_group_id(folder_name: str) -> str:
-    """Group id for leakage-safe split.
-
-    We group all clips that come from the same source video.
-    Example: inside_1_1_1_f_clip_000 -> inside_1_1_1_f
-             outside_2_4_7_s_1_clip_006 -> outside_2_4_7_s_1
-    """
-    # keep inside_/outside_ prefix: it's part of the original source identity
     return folder_name.rsplit("_clip_", 1)[0]
 
 
 def split_indices_by_group(dataset: ProGaitDataset, val_split: float, seed: int):
-    """Split indices such that no group (source video) appears in both splits."""
     groups: dict[str, list[int]] = {}
     for i, s in enumerate(dataset.valid_sessions):
         gid = _extract_group_id(s["folder"].name)
@@ -88,9 +74,7 @@ def split_indices_by_group(dataset: ProGaitDataset, val_split: float, seed: int)
         else:
             train_idx.extend(idxs)
 
-    # Safety: if we overshot too much (rare with huge groups), move last group back.
     if not train_idx:
-        # Ensure non-empty train set.
         moved = val_idx[-len(groups[g_list[-1]]):]
         val_idx = val_idx[:-len(moved)]
         train_idx = moved
@@ -100,14 +84,10 @@ def split_indices_by_group(dataset: ProGaitDataset, val_split: float, seed: int)
 
 def compute_class_weights(labels, num_classes):
     counts = Counter(labels)
-
     total = len(labels)
-
     weights = torch.ones(num_classes)
-
     for cls, cnt in counts.items():
         weights[cls] = total / (num_classes * cnt)
-
     return torch.clamp(weights, max=10.0)
 
 
@@ -117,25 +97,15 @@ def _subsample_indices_by_label(
     caps_by_class: dict[int, int],
     seed: int,
 ) -> list[int]:
-    """Return a (reproducible) subset of indices capped per class.
-
-    caps_by_class: {class_id: max_count}. If a class_id is missing, it is left
-    untouched (no cap).
-    """
     if not caps_by_class:
         return indices
-
     g = torch.Generator().manual_seed(seed)
     idx_tensor = torch.tensor(indices, dtype=torch.long)
     perm = idx_tensor[torch.randperm(len(idx_tensor), generator=g)].tolist()
-
     selected: list[int] = []
     kept_counts: dict[int, int] = {k: 0 for k in caps_by_class}
-
     for i in perm:
-        cls = dataset.class_mapping[
-            dataset.valid_sessions[i]["issue_text"]
-        ]
+        cls = dataset.class_mapping[dataset.valid_sessions[i]["issue_text"]]
         cap = caps_by_class.get(cls)
         if cap is None:
             selected.append(i)
@@ -143,39 +113,27 @@ def _subsample_indices_by_label(
         if kept_counts[cls] < cap:
             selected.append(i)
             kept_counts[cls] += 1
-
-    # Keep deterministic order (helps reproducibility of group split prints etc.)
     return sorted(selected)
 
 
 def _parse_cap_arg(text: str | None, dataset: ProGaitDataset) -> dict[int, int]:
-    """Parse caps like 'Knee Issue=300,Unknown / Other=300'."""
     if not text:
         return {}
-
     caps: dict[int, int] = {}
     parts = [p.strip() for p in text.split(",") if p.strip()]
     for p in parts:
         if "=" not in p:
-            raise ValueError(
-                f"Bad --cap format segment '{p}'. Use 'Label=NUM'."
-            )
+            raise ValueError(f"Bad --cap format segment '{p}'. Use 'Label=NUM'.")
         label, num = [x.strip() for x in p.split("=", 1)]
         if label not in dataset.class_mapping:
             raise ValueError(
-                f"Unknown label '{label}' in --cap. "
-                f"Valid labels: {list(dataset.class_mapping.keys())}"
+                f"Unknown label '{label}' in --cap. Valid labels: {list(dataset.class_mapping.keys())}"
             )
         caps[dataset.class_mapping[label]] = int(num)
     return caps
 
 
 def _parse_labels_arg(text: str | None, dataset: ProGaitDataset) -> list[str]:
-    """Parse --labels into a list of class names.
-
-    - Empty/None means "use all dataset classes".
-    - Supports comma-separated class names that must exist in dataset.class_mapping.
-    """
     if not text:
         return []
     labels = [p.strip() for p in text.split(",") if p.strip()]
@@ -184,7 +142,6 @@ def _parse_labels_arg(text: str | None, dataset: ProGaitDataset) -> list[str]:
             raise ValueError(
                 f"Unknown label '{lab}' in --labels. Valid labels: {list(dataset.class_mapping.keys())}"
             )
-    # de-dup while preserving order
     seen = set()
     out: list[str] = []
     for lab in labels:
@@ -209,43 +166,62 @@ def _filter_indices_to_allowed_labels(
     return filtered
 
 
+class MetricFusedClassifier(nn.Module):
+    def __init__(self, lstm_dim=64, metric_dim=6, head_dim=64, num_classes=5, dropout=0.3):
+        super().__init__()
+        self.metric_norm = nn.LayerNorm(metric_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(lstm_dim + metric_dim, head_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(head_dim, num_classes),
+        )
+
+    def forward(self, lstm_feats, raw_metrics):
+        norm_metrics = self.metric_norm(raw_metrics)
+        combined = torch.cat([lstm_feats, norm_metrics], dim=1)
+        return self.fc(combined)
+
+
 def train_one_epoch(
-    model,
+    encoder,
+    classifier,
     loader,
     optimizer,
     criterion,
     device,
-    max_batches=None
+    max_batches=None,
 ):
-    model.train()
+    encoder.train()
+    classifier.train()
 
     total_loss = 0.0
     correct = 0
     total = 0
 
     for batch_idx, batch in enumerate(loader):
-
-        keypoints, _, _, issues, lengths = batch
-
+        keypoints, metrics, _, issues, lengths = batch
         keypoints = keypoints.to(device)
+        metrics = metrics.to(device)
         issues = issues.to(device)
+        lengths = lengths.to(device)
 
         optimizer.zero_grad()
 
-        logits = model(keypoints, lengths=lengths)
+        lstm_out = encoder(keypoints, lengths)
+        logits = classifier(lstm_out, metrics)
 
         loss = criterion(logits, issues)
-
         loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(
+            list(encoder.parameters()) + list(classifier.parameters()), 1.0
+        )
 
         optimizer.step()
 
         total_loss += loss.item()
-
         preds = torch.argmax(logits, dim=1)
-
         correct += (preds == issues).sum().item()
         total += issues.numel()
 
@@ -254,39 +230,39 @@ def train_one_epoch(
 
     avg_loss = total_loss / max(1, len(loader))
     accuracy = (correct / total) * 100 if total else 0.0
-
     return avg_loss, accuracy
 
 
 @torch.no_grad()
 def validate(
-    model,
+    encoder,
+    classifier,
     loader,
     criterion,
     device,
-    max_batches=None
+    max_batches=None,
 ):
-    model.eval()
+    encoder.eval()
+    classifier.eval()
 
     total_loss = 0.0
     correct = 0
     total = 0
 
     for batch_idx, batch in enumerate(loader):
-
-        keypoints, _, _, issues, lengths = batch
-
+        keypoints, metrics, _, issues, lengths = batch
         keypoints = keypoints.to(device)
+        metrics = metrics.to(device)
         issues = issues.to(device)
+        lengths = lengths.to(device)
 
-        logits = model(keypoints, lengths=lengths)
+        lstm_out = encoder(keypoints, lengths)
+        logits = classifier(lstm_out, metrics)
 
         loss = criterion(logits, issues)
-
         total_loss += loss.item()
 
         preds = torch.argmax(logits, dim=1)
-
         correct += (preds == issues).sum().item()
         total += issues.numel()
 
@@ -295,28 +271,31 @@ def validate(
 
     avg_loss = total_loss / max(1, len(loader))
     accuracy = (correct / total) * 100 if total else 0.0
-
     return avg_loss, accuracy
 
 
 @torch.no_grad()
 def evaluate_predictions(
-    model,
+    encoder,
+    classifier,
     loader,
     device,
     max_batches=None,
 ):
-    """Return y_true, y_pred for a loader."""
-    model.eval()
+    encoder.eval()
+    classifier.eval()
     y_true = []
     y_pred = []
 
     for batch_idx, batch in enumerate(loader):
-        keypoints, _, _, issues, lengths = batch
+        keypoints, metrics, _, issues, lengths = batch
         keypoints = keypoints.to(device)
+        metrics = metrics.to(device)
         issues = issues.to(device)
+        lengths = lengths.to(device)
 
-        logits = model(keypoints, lengths=lengths)
+        lstm_out = encoder(keypoints, lengths)
+        logits = classifier(lstm_out, metrics)
         preds = torch.argmax(logits, dim=1)
 
         y_true.extend(issues.tolist())
@@ -338,21 +317,17 @@ def run_training(
     cap_train,
     cap_val,
     labels,
+    head_dim,
+    dropout,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     print(f"Device: {device}")
-
-    # ---------------------------------------------------
-    # Dataset
-    # ---------------------------------------------------
 
     dataset = ProGaitDataset()
 
     selected_labels = _parse_labels_arg(labels, dataset)
     if selected_labels:
         allowed_old_ids = {dataset.class_mapping[n] for n in selected_labels}
-        # Make a contiguous [0..K-1] mapping in the order the user provided.
         old_to_new = {dataset.class_mapping[n]: j for j, n in enumerate(selected_labels)}
         new_to_name = {j: n for n, j in zip(selected_labels, range(len(selected_labels)))}
         num_classes = len(selected_labels)
@@ -369,14 +344,12 @@ def run_training(
         seed=seed,
     )
 
-    # Optional: restrict to a subset of labels (and remap them to 0..K-1)
     if selected_labels:
         before_t, before_v = len(train_idx), len(val_idx)
         train_idx = _filter_indices_to_allowed_labels(dataset, train_idx, allowed_old_ids)
         val_idx = _filter_indices_to_allowed_labels(dataset, val_idx, allowed_old_ids)
         print(f"Filtered by labels: train {before_t}->{len(train_idx)} | val {before_v}->{len(val_idx)}")
 
-    # Optional: cap per class (subsample) for quick experiments.
     caps_train = _parse_cap_arg(cap_train, dataset)
     caps_val = _parse_cap_arg(cap_val, dataset)
     if caps_train:
@@ -404,19 +377,15 @@ def run_training(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=pad_collate_fn
+        collate_fn=pad_collate_fn,
     )
 
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=pad_collate_fn
+        collate_fn=pad_collate_fn,
     )
-
-    # ---------------------------------------------------
-    # Class weights
-    # ---------------------------------------------------
 
     train_labels = [
         old_to_new[
@@ -427,81 +396,57 @@ def run_training(
         for i in train_idx
     ]
 
-    class_weights = compute_class_weights(
-        train_labels,
-        num_classes
-    ).to(device)
-
+    class_weights = compute_class_weights(train_labels, num_classes).to(device)
     print("\nClass Weights:")
     print(class_weights)
 
-    # ---------------------------------------------------
-    # Model
-    # ---------------------------------------------------
-
-    model = GaitSTGCN(
-        num_joints=13,
-        num_classes=num_classes
+    encoder = GaitSequenceLSTM().to(device)
+    classifier = MetricFusedClassifier(
+        lstm_dim=64,
+        metric_dim=6,
+        head_dim=head_dim,
+        num_classes=num_classes,
+        dropout=dropout,
     ).to(device)
 
-    # ---------------------------------------------------
-    # Loss + Optimizer
-    # ---------------------------------------------------
-
-    criterion = nn.CrossEntropyLoss(
-        weight=class_weights,
-    )
-
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        list(encoder.parameters()) + list(classifier.parameters()),
         lr=lr,
-        weight_decay=1e-4
+        weight_decay=1e-4,
     )
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="max",
         factor=0.5,
-        patience=5
+        patience=5,
     )
 
-    # ---------------------------------------------------
-    # Save path
-    # ---------------------------------------------------
-
-    models_dir = (
-        Path(__file__).resolve().parent.parent.parent
-        / "data"
-        / "models"
+    criterion = nn.CrossEntropyLoss(
+        weight=class_weights,
     )
 
-    models_dir.mkdir(parents=True, exist_ok=True)
-
-    save_path = models_dir / "stgcn_best.pth"
-
+    save_path = MODELS_DIR / "lstm_only.pth"
     best_val_acc = 0.0
 
-    # ---------------------------------------------------
-    # Training loop
-    # ---------------------------------------------------
-
     for epoch in range(1, epochs + 1):
-
         train_loss, train_acc = train_one_epoch(
-            model,
+            encoder,
+            classifier,
             train_loader,
             optimizer,
             criterion,
             device,
-            max_batches
+            max_batches,
         )
 
         val_loss, val_acc = validate(
-            model,
+            encoder,
+            classifier,
             val_loader,
             criterion,
             device,
-            max_batches
+            max_batches,
         )
 
         scheduler.step(val_acc)
@@ -517,86 +462,49 @@ def run_training(
             f"Val Acc {val_acc:.1f}%"
         )
 
-        # -----------------------------------------
-        # Evaluate predictions
-        # -----------------------------------------
-
         y_true, y_pred = evaluate_predictions(
-            model=model,
+            encoder=encoder,
+            classifier=classifier,
             loader=val_loader,
             device=device,
             max_batches=max_batches,
         )
 
-        labels = list(range(num_classes))
-
-        cm = confusion_matrix(
-            y_true,
-            y_pred,
-            labels=labels
-        )
-
-        target_names = [new_to_name.get(i, str(i)) for i in labels]
-
+        labels_list = list(range(num_classes))
+        cm = confusion_matrix(y_true, y_pred, labels=labels_list)
+        target_names = [new_to_name.get(i, str(i)) for i in labels_list]
         report = classification_report(
             y_true,
             y_pred,
-            labels=labels,
+            labels=labels_list,
             target_names=target_names,
             zero_division=0,
             digits=3,
         )
 
-        # -----------------------------------------
-        # Save best model
-        # -----------------------------------------
-
         if val_acc > best_val_acc:
-
             best_val_acc = val_acc
-
             torch.save(
                 {
                     "epoch": epoch,
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
+                    "encoder": encoder.state_dict(),
+                    "classifier": classifier.state_dict(),
                     "num_classes": num_classes,
                     "best_val_acc": best_val_acc,
                     "val_confusion_matrix": cm,
                     "val_report": report,
                 },
-                save_path
+                save_path,
             )
-
             print(f"✅ Saved best model -> {save_path}")
 
-            # Save reports
-            reports_dir = models_dir / "stgcn_reports"
+            reports_dir = MODELS_DIR / "lstm_reports"
             reports_dir.mkdir(parents=True, exist_ok=True)
-
-            report_path = (
-                reports_dir /
-                f"best_epoch_{epoch:03d}_report.txt"
-            )
-
-            cm_path = (
-                reports_dir /
-                f"best_epoch_{epoch:03d}_cm.csv"
-            )
-
-            report_path.write_text(
-                report,
-                encoding="utf-8"
-            )
-
+            report_path = reports_dir / f"best_epoch_{epoch:03d}_report.txt"
+            cm_path = reports_dir / f"best_epoch_{epoch:03d}_cm.csv"
+            report_path.write_text(report, encoding="utf-8")
             import numpy as np
-
-            np.savetxt(
-                cm_path,
-                cm,
-                delimiter=",",
-                fmt="%d"
-            )
+            np.savetxt(cm_path, cm, delimiter=",", fmt="%d")
 
             print("Validation classification report:")
             print(report)
@@ -608,9 +516,7 @@ def run_training(
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -635,6 +541,8 @@ if __name__ == "__main__":
         default="",
         help="Comma-separated class names to restrict training/eval to (and remap to 0..K-1). Example: 'Knee Issue,Unknown / Other'.",
     )
+    parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument("--dropout", type=float, default=0.3)
 
     args = parser.parse_args()
 
@@ -648,4 +556,6 @@ if __name__ == "__main__":
         cap_train=args.cap_train,
         cap_val=args.cap_val,
         labels=args.labels,
+        head_dim=args.head_dim,
+        dropout=args.dropout,
     )
