@@ -3,36 +3,29 @@ from pathlib import Path
 
 # ── Project layout ──
 SCRIPT_DIR   = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent  
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
 SESSION_DIR  = PROJECT_ROOT / 'data' / 'sessions'
+RESULTS_DIR  = PROJECT_ROOT / 'data' / 'results'
 
-def normalize_session(session_id: str):
-    session_folder = SESSION_DIR / session_id
-    kp_path = session_folder / "keypoints.npy"
-    
-    if not kp_path.exists():
-        return
-        
-    # Load original keypoints shape: (frames, 66)
-    keypoints = np.load(str(kp_path))
+
+def _normalize_keypoints_array(keypoints: np.ndarray) -> np.ndarray | None:
     normalized_keypoints = np.copy(keypoints)
-    
     num_frames = keypoints.shape[0]
-    
+
     # Collect per-frame scale estimates first so we can use a robust clip-level scale.
     # Primary: pelvis->neck (shoulders). Fallback: hip-to-hip distance.
     scales = []
     for i in range(num_frames):
         kp_row = keypoints[i]
-        
+
         # Hips: Left (23), Right (24)
         left_hip_x,  left_hip_y  = kp_row[23 * 2], kp_row[23 * 2 + 1]
         right_hip_x, right_hip_y = kp_row[24 * 2], kp_row[24 * 2 + 1]
-        
+
         # Shoulders: Left (11), Right (12)
         left_sho_x,  left_sho_y  = kp_row[11 * 2], kp_row[11 * 2 + 1]
         right_sho_x, right_sho_y = kp_row[12 * 2], kp_row[12 * 2 + 1]
-        
+
         if np.isnan(left_hip_x) or np.isnan(right_hip_x):
             continue
 
@@ -57,7 +50,7 @@ def normalize_session(session_id: str):
     # Use a robust scale for the full clip
     if len(scales) == 0:
         # Can't normalize (hips missing everywhere)
-        return
+        return None
 
     clip_scale = float(np.median(scales))
 
@@ -84,11 +77,41 @@ def normalize_session(session_id: str):
 
         # Hard clamp as a last-resort safety (prevents extreme outliers from poisoning training)
         normalized_keypoints[i, :] = np.clip(normalized_keypoints[i, :], -10.0, 10.0)
-            
-    # Save the strictly normalized data for the ML model
-    save_path = session_folder / "keypoints_normalized.npy"
+
+    return normalized_keypoints
+
+
+def normalize_keypoints_file(kp_path: Path, save_path: Path | None = None) -> Path | None:
+    if not kp_path.exists():
+        return None
+
+    keypoints = np.load(str(kp_path))
+    normalized_keypoints = _normalize_keypoints_array(keypoints)
+    if normalized_keypoints is None:
+        return None
+
+    if save_path is None:
+        save_path = kp_path.parent / "keypoints_normalized.npy"
+
     np.save(str(save_path), normalized_keypoints)
+    return save_path
+
+def normalize_session(session_id: str):
+    session_folder = SESSION_DIR / session_id
+    kp_path = session_folder / "keypoints.npy"
+
+    save_path = normalize_keypoints_file(kp_path)
+    if save_path is None:
+        return
+
     print(f"✅ Centered & Scaled: {session_id}")
+
+
+def normalize_result_video(video_id: str, results_dir: Path | None = None) -> Path | None:
+    if results_dir is None:
+        results_dir = RESULTS_DIR
+    kp_path = results_dir / video_id / "keypoints.npy"
+    return normalize_keypoints_file(kp_path)
 
 def main():
     available_sessions = [d.name for d in SESSION_DIR.iterdir() if d.is_dir()]

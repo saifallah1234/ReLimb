@@ -2,3 +2,13 @@ numpy
 torch
 mlflow
 scikit-learn
+fastapi
+uvicorn
+celery[redis]
+python-multipart
+pytest
+protobuf<5
+groq
+python-dotenv
+streamlit
+requests

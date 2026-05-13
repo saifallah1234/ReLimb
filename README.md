@@ -186,6 +186,78 @@ pip install datasets huggingface-hub
 
 ## Usage
 
+### FastAPI + Celery Inference Service
+
+The service accepts a video upload, saves it to `data/incoming/`, enqueues a Celery task in Redis, and blocks until the prediction is complete. The output is an LLM-generated summary based on the predicted label.
+
+**Prereqs:** Redis running on `localhost:6379` (override with `RELIMB_REDIS_URL`).
+
+Run the worker:
+
+```powershell
+python scripts/run_worker.py
+```
+
+On Windows, the worker uses the `solo` pool to avoid `WinError 5` permission issues (already configured in the script).
+
+Run the API:
+
+```powershell
+python scripts/run_api.py
+```
+
+Example request (blocking until response):
+
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8000/predict -Method Post -Form @{video=Get-Item .\data\incoming\video1.mp4}
+```
+
+### Streamlit UI
+
+Launch the UI after the API and worker are running:
+
+```powershell
+streamlit run src/ui/app.py
+```
+
+The UI uploads a video to the `/predict` endpoint and displays the LLM summary.
+
+Optional: Enter a message in your language so the LLM responds in the same language.
+
+Response:
+
+- `label`
+- `summary`
+- `score` (if available)
+
+Environment variables:
+
+- `RELIMB_REDIS_URL` (default: `redis://localhost:6379/0`)
+- `RELIMB_CELERY_BACKEND` (default: same as broker)
+- `RELIMB_TASK_TIMEOUT_S` (default: `600`)
+- `RELIMB_FIXED_LABEL` (optional: override label for testing)
+- `GROQ_API_KEY` (required for LLM responses)
+- `RELIMB_GROQ_MODEL` (default: `meta-llama/llama-4-scout-17b-16e-instruct`)
+- `RELIMB_INCOMING_DIR`, `RELIMB_RESULTS_DIR` (optional override paths)
+- `RELIMB_API_HOST`, `RELIMB_API_PORT`
+
+### Single-Video Pipeline (Incoming → Results)
+
+Place a new video inside `data/incoming/` (or pass any path), then run the single-video pipeline to write outputs in `data/results/<video_id>/`.
+
+```bash
+python src/pose_extraction/single_video_pipeline.py data/incoming/walk_001.mp4
+```
+
+Outputs:
+
+- `data/results/walk_001/keypoints.npy`
+- `data/results/walk_001/keypoints_normalized.npy`
+- `data/results/walk_001/detected_events.csv`
+- `data/results/walk_001/prediction.json` (label + template-based summary)
+
+LLM prompts are built from the predicted label and any available metadata notes found next to the video (e.g., JSON files created by `build_dataset_index.py`).
+
 ### 0. Isolate Prosthetic Limb User (for Multi-Person Videos)
 
 If your videos contain multiple people (doctors, other patients), first isolate the person with the prosthetic limb:

@@ -11,8 +11,10 @@ SCRIPT_DIR   = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
 # 🎯 STRICT PATHS: Pointing exactly to root/data/..., completely avoiding src/
-DATA_DIR    = PROJECT_ROOT / 'data' / 'raw_videos' / 'hf'
-SESSION_DIR = PROJECT_ROOT / 'data' / 'sessions'
+DATA_DIR     = PROJECT_ROOT / 'data' / 'raw_videos' / 'hf'
+SESSION_DIR  = PROJECT_ROOT / 'data' / 'sessions'
+INCOMING_DIR = PROJECT_ROOT / 'data' / 'incoming'
+RESULTS_DIR  = PROJECT_ROOT / 'data' / 'results'
 
 # ── Parameters ─────────────────────────────────────────────────────────────
 TEST_LIMIT            = None   # Set to None to run on all videos
@@ -46,11 +48,18 @@ def detect_events_from_signal(signal, fps, min_separation_s=MIN_STEP_SEPARATION_
 
 # ── Core processing ────────────────────────────────────────────────────────
 
-def process_video(video_path: Path, session_id: str, xml_path: Path | None = None):
+def process_video(
+    video_path: Path,
+    session_id: str,
+    xml_path: Path | None = None,
+    output_dir: Path = SESSION_DIR,
+):
     # 1. 🌟 IF XML EXISTS: Use the high-quality smoothed CVAT annotations!
     if xml_path and xml_path.exists():
         print(f"  ⭐ XML found! Using high-quality smoothed annotations.")
-        from xml_loader import load_xml_session
+        from src.pose_extraction.xml_loader import load_xml_session
+        if output_dir != SESSION_DIR:
+            print("  ⚠️ XML loader writes to data/sessions; output_dir will be ignored.")
         fps = 25.0
         cap = cv.VideoCapture(str(video_path))
         if cap.isOpened():
@@ -132,8 +141,15 @@ def process_video(video_path: Path, session_id: str, xml_path: Path | None = Non
 
     keypoints_array = np.stack(keypoint_rows, axis=0).astype(np.float32)
 
+    # Make MediaPipe output closer to XML smoothing
+    try:
+        from src.pose_extraction.xml_loader import apply_progait_smoothing
+        keypoints_array = apply_progait_smoothing(keypoints_array)
+    except Exception as e:
+        print(f"  ⚠️ Smoothing skipped: {e}")
+
     # 4. SAVE (Force Overwrite)
-    session_folder = SESSION_DIR / session_id
+    session_folder = output_dir / session_id
     session_folder.mkdir(parents=True, exist_ok=True)
 
     rows = []
@@ -145,6 +161,27 @@ def process_video(video_path: Path, session_id: str, xml_path: Path | None = Non
     pd.DataFrame(rows).to_csv(session_folder / 'detected_events.csv', index=False)
     np.save(str(session_folder / 'keypoints.npy'), keypoints_array)
     print(f"  💾 Overwritten MediaPipe Keypoints & Events to {session_folder}")
+
+
+def derive_video_id(video_path: Path) -> str:
+    return video_path.stem
+
+
+def process_single_video(
+    video_path: Path,
+    video_id: str | None = None,
+    output_dir: Path | None = None,
+    xml_path: Path | None = None,
+):
+    video_path = Path(video_path)
+    if output_dir is None:
+        output_dir = RESULTS_DIR
+    if video_id is None:
+        video_id = derive_video_id(video_path)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    process_video(video_path, video_id, xml_path=xml_path, output_dir=output_dir)
+    return output_dir / video_id
 
 
 def main():

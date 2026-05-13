@@ -12,4 +12,9 @@ data/models/
 data/features/
 data/raw_videos/hf/dataset_index.json
 data/raw_videos/hf/metadata.jsonl
-
+data/incoming/
+data/results
+data/templates.json
+docs/
+examples/
+mlruns/
