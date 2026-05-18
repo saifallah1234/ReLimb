@@ -1,201 +1,69 @@
 # ReLimb
+![ReLimb App ](assets/ReLimb.png)
+## 🚀 Main Solution
 
-## Overview
+ReLimb is a gait‑analysis system that helps people with leg prosthetics understand how they are walking and what to do next. It turns a short walking video into a clear, empathetic summary that explains the detected gait issue and suggests safe next steps.
 
-ReLimb is a comprehensive gait analysis and limb detection system designed to analyze walking patterns and detect gait asymmetries from video data. The project leverages computer vision and pose estimation techniques to extract biomechanical features from walking videos, with a particular focus on identifying limps and abnormal gait patterns. It integrates with the ProGait dataset for transfemoral prosthesis research.
+## 🎯 Project Goal
 
-## Key Features
+Build a practical tool for prosthetic users who are still adapting to their first limb. The long‑term vision is a mobile app that helps them feel confident, track progress, and share insights with clinicians.
 
-- **Automated Gait Event Detection**: Detects heel strikes and toe-offs from video using pose estimation
-- **Gait Asymmetry Analysis**: Computes stride time, stance time, and swing time asymmetries between left and right legs
-- **Real-time Pose Tracking**: Uses MediaPipe and cvzone for robust pose landmark detection
-- **Signal Processing**: Implements Butterworth low-pass filtering for noise reduction in gait signals
-- **Feature Extraction**: Generates comprehensive gait metrics including stride, stance, and swing parameters
-- **ProGait Dataset Integration**: Tools for working with the ProGait multi-purpose video dataset for prosthesis users
+## ✅ What We Implemented So Far
 
-## Project Structure
+### Data + Preprocessing
+- Extract raw keypoints from **XML annotations** when available; otherwise from video.
+- Normalize and smooth keypoints to reduce noise and stabilize gait signals.
+- Crop and clip videos into smaller samples to expand the dataset.
 
-### 📁 `src/` - Source Code
+### Models & Training
+- LSTM and ST‑GCN models for gait classification.
+- Training done on Vertex AI with data stored in Google Cloud Storage buckets.
+- Benchmarking runs to compare models and select the best performer.
+- Current best model: **ST‑GCN**, using a graph of joint relationships.
 
-Main implementation directory containing the core functionality:
+### Inference + App
+- FastAPI + Celery pipeline that predicts a label and generates an LLM explanation.
+- Streamlit UI for uploading a video and reading the response.
 
-#### `src/pose_extraction/`
-- **`gait_algorithm.py`**: Core gait analysis pipeline
-  - Extracts pose landmarks from video using cvzone PoseDetector
-  - Computes horizontal relative distance signals (hip_x - foot_x) for each leg
-  - Applies Butterworth low-pass filter (order 10, normalized cutoff 0.1752)
-  - Detects gait events (heel strikes as peaks, toe-offs as troughs)
-  - Outputs timestamped events CSV files for each video session
-  - Configurable parameters: tolerance (0.2s), minimum step separation (0.8s)
+## 🧠 What ReLimb Solves
 
-- **`limb_detection.py`**: Feature computation and asymmetry analysis
-  - Processes detected events from session folders
-  - Computes gait timing metrics: stride time, stance time, swing time
-  - Calculates percentage-based asymmetry indices between left/right legs
-  - Aggregates results across multiple sessions
-  - Outputs consolidated feature dataset (Excel/CSV format)
+**Problem:** New prosthetic users often feel uncertain about their gait and don’t know whether their walk looks normal or needs correction. Clinical feedback is limited and slow.
 
-- **`video_cropper.py`**: Multi-person video isolation tool
-  - Detects and tracks all people in video using YOLOv8
-  - Multiple selection methods: auto, largest area, most frames, center position
-  - Crops video to focus on person with prosthetic limb
-  - Smooth bounding box interpolation to reduce jitter
-  - Configurable padding and confidence thresholds
+**Solution:** ReLimb provides a clear, non‑alarming interpretation of gait patterns, so users can feel more confident and know when to seek help.
 
-- **`batch_crop_videos.py`**: Batch video processing
-  - Automatically processes entire ProGait dataset
-  - Preserves directory structure (inside/outside folders)
-  - Skips already processed videos
-  - Creates error logs for failed videos
+## 🛠️ Current Capabilities (Summary)
 
-- **`interactive_selector.py`**: Manual person selection tool
-  - Interactive interface for ambiguous cases
-  - Shows statistics and preview frames for each detected person
-  - Manual selection with fallback to auto-selection
-  - Useful when multiple people are present in frame
+- Pose extraction and gait event detection
+- Normalization and smoothing
+- Video clipping and dataset preparation
+- ST‑GCN and LSTM training + benchmarking
+- Best‑model selection (ST‑GCN)
+- LLM‑based patient‑friendly summary
 
-- **`README_VIDEO_CROPPING.md`**: Complete guide for video isolation tools
+## � Future Roadmap (TODO)
 
-#### `src/features/`
-- **`feature_events.csv`** & **`feature_events.xlsx`**: Computed gait features
-  - Contains per-session metrics: left/right stride/stance/swing means
-  - Asymmetry percentages for stride, stance, and swing phases
-  - Generated by `limb_detection.py` from detected events
+1) **Biomechanical Metrics + Two‑Head Architecture**  
+   Feed MLP with biomechanical metrics (the “mathematician”) alongside ST‑GCN (the “viewer”).
 
-#### `src/ml/`
-- Machine learning models directory (currently empty - reserved for future ML implementations)
+2) **Skin Irritation Detection**  
+   Detect redness or irritation near prosthetic contact areas.
 
-#### `src/signal_processing/`
-- Signal processing utilities directory (currently empty - reserved for advanced filtering methods)
+3) **Progress Tracker**  
+   Track walking improvement over time.
 
-#### `src/mobile_integration/`
-- Mobile app integration directory (currently empty - planned for smartphone deployment)
+4) **Mobile App**  
+   Ship a full mobile experience with on‑device upload and feedback.
 
-### 📁 `data/` - Data Storage
+5) **Clinical Collaboration**  
+   Enable doctors to monitor progress and provide guidance inside the app.
 
-#### `data/raw_videos/`
-- **Input videos**: `left_right.mp4`, `side_view.mp4`, `walking_green.mp4`, `walking_white.mp4`
-- **`hf/`**: Hugging Face ProGait dataset videos
-  - `inside/`: Videos captured inside parallel bars
-  - `outside/`: Videos captured outside parallel bars
-  - Organized by subject and prosthesis configuration
-
-#### `data/sessions/`
-- **Session folders** (format: `YYYYMMDD_HHMMSS_##_videoname/`)
-- Each session contains:
-  - **`detected_events.csv`**: Frame-by-frame gait events
-    - Columns: side (left/right), event (heel_strike/toe_off), frame number, time_s
-    - Example: Frame 37 at 1.48s - left heel strike
-
-#### `data/features/`
-- Processed feature files (empty - outputs saved to `src/features/`)
-
-#### `data/models/`
-- Trained model storage (currently empty)
-
-### 📁 `test/` - Testing & Experiments
-
-- **`gait.py`**: Real-time gait asymmetry detection demo
-  - Tracks knee angles and ankle movements
-  - Calculates step ratio between legs
-  - Visual alerts for detected limps
-  - Displays asymmetry scores in degrees
-
-- **`mediapipe_pose.py`**: Basic MediaPipe pose detection test
-  - Demonstrates pose landmark extraction
-  - Shows bounding box detection
-  - Tests distance and angle calculations between landmarks
-
-- **`ml.py`**: Advanced gait analysis with clinical interpretation
-  - Implements clinical thresholds (15% or 0.1s difference)
-  - Provides detailed interpretations of gait patterns
-  - Identifies potential issues: weight offloading, pain indicators, prosthetic fit problems
-  - Generates comprehensive gait analysis reports
-
-- **`gait_phases.png`** & **`numbers.png`**: Reference images for gait cycle visualization
-
-### 📁 `notebooks/` - Jupyter Notebooks
-
-Currently empty - reserved for data exploration and visualization notebooks
-
-### 📁 `hf/` - Hugging Face Integration
-
-#### `load_dataset.py`
-- Script to load the ProGait dataset from Hugging Face
-- Usage: `load_dataset("ericyxy98/ProGait", use_auth_token=True)`
-
-#### `ProGait/` - ProGait Dataset Repository
-Official ProGait dataset for transfemoral prosthesis users (ICCV'25)
-
-- **`annotations/`**: Ground truth annotations
-  - **`inside/`** & **`outside/`**: Scenario-based annotations
-  - XML files (CVAT format) for video object segmentation
-  - `.npy.gz` files: Compressed numpy arrays for keypoints and masks
-  - `.txt` files: Textual gait descriptions and recommendations
-  
-- **`videos/`**: Raw video data (412 clips from 4 amputees)
-  - Multiple prosthesis configurations and walking trials
-  - Frontal and sagittal views
-
-- **`previews/`**: Preview videos for quick inspection
-
-- **`ProGait/`**: Reference implementation
-  - **`utils.py`**: Video processing utilities (377 lines)
-    - `video_to_numpy()`: Convert video to numpy arrays
-    - `show_video()`: Animated visualization
-    - `show_masked_video()`: Overlay segmentation masks
-    - `draw_keypoints()`: Render 23 pose keypoints with connections
-  - **`models/`**: Baseline model implementations (LSTM, etc.)
-  - **`datasets/`**: Dataset loaders
-  - **`demo/`**: Verification scripts
-  - **`environment.yml`**: Conda environment specification
-
-- **`metadata.jsonl`**: Dataset metadata in JSON Lines format
-
-- **Dataset Naming Convention**: `<subject>_<prosthesis>_<trial>_<view>[_<round>]`
-  - Example: `1_3_2_f` = Subject 1, Prosthesis 3, Trial 2, Frontal view
-  - Example: `2_6_2_s_2` = Subject 2, Prosthesis 6, Trial 2, Sagittal view, 2nd round trip
-
-## Installation
-
-### Prerequisites
-
-```bash
-# Python 3.8+
-# OpenCV
-# MediaPipe (via cvzone)
-# NumPy, Pandas, SciPy
-```
-
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/saifallah1234/ReLimb.git
-cd ReLimb
-
-# Install dependencies
-pip install opencv-python cvzone numpy pandas scipy openpyxl
-
-# For video cropping (isolating prosthetic limb users from multi-person videos)
-pip install ultralytics
-
-# For ProGait dataset access
-pip install datasets huggingface-hub
-```
-
-## Usage
-
-### FastAPI + Celery Inference Service
-
-The service accepts a video upload, saves it to `data/incoming/`, enqueues a Celery task in Redis, and blocks until the prediction is complete. The output is an LLM-generated summary based on the predicted label.
-
-**Prereqs:** Redis running on `localhost:6379` (override with `RELIMB_REDIS_URL`).
-
-Run the worker:
+## 🧪 Running the Project (Quick Start)
 
 ```powershell
-python scripts/run_worker.py
+pip install -r .\requirements.txt
+py -m scripts.run_worker
+py -m scripts.run_api
+streamlit run .\src\ui\app.py
 ```
 
 On Windows, the worker uses the `solo` pool to avoid `WinError 5` permission issues (already configured in the script).
@@ -304,15 +172,6 @@ This will:
 - Compute asymmetry percentages
 - Save results to `src/features/feature_events.xlsx`
 
-### 3. Run Tests
-
-```bash
-# Real-time gait analysis
-python test/gait.py
-
-# Clinical interpretation
-python test/ml.py
-```
 
 ## Algorithm Details
 
@@ -339,12 +198,6 @@ Applied to:
 - **Stride Time**: Heel strike to next heel strike (same foot)
 - **Stance Time**: Heel strike to toe-off (weight-bearing phase)
 - **Swing Time**: Toe-off to next heel strike (swing phase)
-
-### Clinical Thresholds
-
-- **Significant asymmetry**: >15% or >0.1 seconds difference
-- **Limp detection**: Combines stride, stance, and swing asymmetries
-- **Interpretations**: Identifies potential causes (pain, prosthetic fit, compensation)
 
 ## ProGait Dataset
 

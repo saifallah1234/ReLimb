@@ -1,6 +1,6 @@
 import torch
 
-from src.models.dataset import ProGaitDataset, pad_collate_fn
+from src.data.datasets.relimb_dataset import ProGaitDataset, pad_collate_fn
 from src.models.model_stgcn import GaitSTGCN
 
 

@@ -7,7 +7,7 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 
-from src.models.dataset import ProGaitDataset, pad_collate_fn
+from src.data.datasets.relimb_dataset import ProGaitDataset, pad_collate_fn
 
 
 def run_dataset_tests():

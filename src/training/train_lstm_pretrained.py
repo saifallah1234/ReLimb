@@ -29,7 +29,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import f1_score, classification_report
 import mlflow
 
-from src.models.dataset import ProGaitDataset, pad_collate_fn
+from src.data.datasets.relimb_dataset import ProGaitDataset, pad_collate_fn
 from src.models.model_lstm import GaitSequenceLSTM
 MODELS_DIR   = PROJECT_ROOT / "data" / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)

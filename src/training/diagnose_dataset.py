@@ -5,7 +5,7 @@ Run this before training to catch silent bugs:
   1. Class mapping vs actual data distribution
   2. Whether clip session_ids match dataset_index entries
   3. What the model actually predicts after 1 epoch (sanity check)
-  4. Tests the ProGaitDataset to ensure clean_keypoints() removes all NaNs.
+    4. Tests the ReLimb dataset to ensure clean_keypoints() removes all NaNs.
 
 Usage:
     python src/training/diagnose.py
@@ -102,7 +102,7 @@ def check_session_label_alignment():
 
 def check_dataset_post_cleaning():
     """
-    Instead of checking raw files, this checks the output of ProGaitDataset 
+    Instead of checking raw files, this checks the output of the ReLimb dataset
     to ensure the pandas interpolation fix successfully removes all NaNs.
     """
     print("\n── 4. DATASET CLEANING SANITY (NaN check) ───────────")

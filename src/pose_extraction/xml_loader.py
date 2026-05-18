@@ -1,10 +1,10 @@
 """
 xml_loader.py
 =============
-Parses a ProGait-format CVAT XML annotation file and produces:
+Parses a ReLimb-format CVAT XML annotation file and produces:
 
   1. keypoints.npy    — shape [N_frames, 66] float32
-                        Mapped to MediaPipe slots. Smoothed using ProGait's 
+                        Mapped to MediaPipe slots. Smoothed using ReLimb's 
                         original spline algorithm.
   2. detected_events.csv — heel-strike / toe-off events derived from the
                            smoothed ankle keypoint trajectories.
@@ -23,7 +23,7 @@ SCRIPT_DIR   = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 SESSION_DIR  = PROJECT_ROOT / "data" / "sessions"
 
-# ── ProGait label (1-indexed str) → MediaPipe landmark index ─────────────────
+# ── ReLimb label (1-indexed str) → MediaPipe landmark index ─────────────────
 PROGAIT_TO_MEDIAPIPE: dict[str, int | None] = {
     "6":  12,   # left shoulder
     "7":  11,   # right shoulder
@@ -53,7 +53,7 @@ MIN_STEP_SEPARATION_S = 0.8
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Smoothing Logic (Direct from ProGait Authors)
+# Smoothing Logic (Direct from ReLimb Authors)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def apply_progait_smoothing(keypoints_66: np.ndarray, lam: float = 10.0) -> np.ndarray:

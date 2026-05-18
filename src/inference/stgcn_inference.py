@@ -7,7 +7,7 @@ from typing import Iterable
 import numpy as np
 import torch
 
-from src.models.dataset import clean_keypoints, filter_gait_keypoints
+from src.data.datasets.relimb_dataset import clean_keypoints, filter_gait_keypoints
 from src.models.model_stgcn import GaitSTGCN
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent

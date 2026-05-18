@@ -29,7 +29,7 @@ class GaitSequenceLSTM(nn.Module):
           total LSTM block: ~28,000  (was 207,744)
 
         Fusion output: (B, 64)  — concat with MLP's (B, 64) → (B, 128)
-        Note: fusion_dim in ProGaitFusion must be updated to 128 (not 192)
+    Note: fusion_dim in ReLimbFusion must be updated to 128 (not 192)
               if you keep MLP output_dim=64 and this LSTM output=64.
         """
         super().__init__()

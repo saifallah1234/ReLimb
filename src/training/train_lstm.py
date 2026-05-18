@@ -22,7 +22,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import confusion_matrix, classification_report
 
-from src.models.dataset import ProGaitDataset, pad_collate_fn
+from src.data.datasets.relimb_dataset import ProGaitDataset, pad_collate_fn
 from src.models.model_lstm import GaitSequenceLSTM
 
 MODELS_DIR = PROJECT_ROOT / "data" / "models"

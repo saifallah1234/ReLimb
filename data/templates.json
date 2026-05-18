@@ -1,0 +1,22 @@
+{
+  "Normal Gait": [
+    "The gait pattern appears within normal limits. No obvious deviations were detected in this clip.",
+    "Observed gait looks balanced and consistent, with no clear asymmetry or compensatory pattern."
+  ],
+  "Foot & Ankle Issue": [
+    "The gait pattern suggests a foot or ankle-related deviation, which may indicate limited push-off or altered foot mechanics.",
+    "There is evidence consistent with a foot/ankle issue, such as reduced ankle motion or compensatory foot placement."
+  ],
+  "Knee Issue": [
+    "The gait pattern is consistent with a knee-related deviation, which may reflect altered knee flexion or stability.",
+    "Findings suggest a knee issue pattern, possibly involving limited knee flexion or compensatory movement."
+  ],
+  "Alignment Issue": [
+    "The gait pattern suggests a limb alignment-related deviation, which may affect overall symmetry and load distribution.",
+    "Observed gait indicates possible alignment issues, leading to compensatory mechanics during walking."
+  ],
+  "Unknown / Other": [
+    "The gait pattern could not be confidently categorized. Consider capturing another clip or reviewing the recording conditions.",
+    "This clip does not clearly match a known pattern; additional data may help refine the assessment."
+  ]
+}

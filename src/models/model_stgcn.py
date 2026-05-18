@@ -130,7 +130,7 @@ class GaitSTGCN(nn.Module):
         # ====================================================
         #
         # Your dataset does NOT feed MediaPipe indices (11/12/23/24/...) into the model.
-        # `ProGaitDataset.filter_gait_keypoints()` selects 13 landmarks by index from
+    # `ReLimbDataset.filter_gait_keypoints()` selects 13 landmarks by index from
         # `GAIT_LANDMARK_INDICES` and packs them densely into a (T, 13*2) feature vector.
         #
         # So the ST-GCN graph MUST be defined in that compact index space: [0..num_joints-1].

@@ -1,7 +1,7 @@
 """
 visualize_dataset_pipeline.py
 ===============================
-Loads the actual ProGaitDataset and visualizes the keypoints directly from __getitem__.
+Loads the actual ReLimb dataset and visualizes the keypoints directly from __getitem__.
 Shows RAW dataset output on the left, and NORMALIZED (/25.0) on the right.
 Scaled up for better visibility!
 """
@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Import your dataset directly
-from src.models.dataset import ProGaitDataset
+from src.data.datasets.relimb_dataset import ProGaitDataset
 
 def visualize_dataset_clip(dataset, idx):
     # 1. Pull directly from YOUR dataset pipeline 
